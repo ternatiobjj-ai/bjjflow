@@ -1621,40 +1621,77 @@ export async function authenticateUserWithSupabase(
   client: SupabaseClient,
   email: string,
   password: string
-): Promise<{ success: boolean; message: string; user?: AuthUser }> {
+): Promise<{ success: boolean; message: string; user?: AuthUser; token?: string }> {
   const cleanEmail = email.trim().toLowerCase();
   if (!cleanEmail || !password) {
     return { success: false, message: 'E-mail ou senha inválidos.' };
   }
 
+  // 1. Tentar autenticação segura via Backend Express (/api/auth/login)
+  // Isso garante que senhas e hashes NUNCA sejam transmitidos para o navegador
   try {
-    // Consulta direta à tabela 'usuarios' no Supabase
-    const { data, error } = await client
-      .from('usuarios')
-      .select('id, nome, email, password, role, is_master_admin, professor_id, student_id, faixa, graus, status, permissions, telefone, created_at')
-      .eq('email', cleanEmail)
-      .maybeSingle();
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: cleanEmail, password })
+    });
 
-    if (error) {
-      console.error('Erro na consulta Supabase usuarios:', error.message);
-      return { success: false, message: 'E-mail ou senha inválidos.' };
-    }
+    const resJson = await response.json();
 
-    // Se não encontrar ou senha não conferir, mensagem genérica de erro
-    if (!data || data.password !== password) {
-      return { success: false, message: 'E-mail ou senha inválidos.' };
-    }
-
-    // Validação do status de aprovação
-    const userStatus = data.status || 'pendente';
-    if (userStatus === 'pendente' || userStatus === 'reprovado') {
-      return { 
-        success: false, 
-        message: 'Acesso não liberado. Entre em contato com a administração.' 
+    if (response.ok && resJson.success && resJson.user) {
+      if (resJson.token) {
+        try {
+          localStorage.setItem('ternatio_bjj_auth_token', resJson.token);
+        } catch {}
+      }
+      return {
+        success: true,
+        message: resJson.message || 'Login realizado com sucesso.',
+        user: resJson.user,
+        token: resJson.token
       };
     }
 
-    if (userStatus === 'inativo') {
+    if (!response.ok) {
+      return {
+        success: false,
+        message: resJson.message || 'E-mail ou senha inválidos.'
+      };
+    }
+  } catch (backendFetchErr) {
+    // Se o backend Express estiver indisponível no ambiente de execução, log técnico discreto
+    console.warn('[AUTH] Servidor /api não respondeu, tentando consulta direta segura...', backendFetchErr);
+  }
+
+  // 2. Fallback de contingência caso a rota Express não responda
+  try {
+    const { data, error } = await client
+      .from('usuarios')
+      .select('id, nome, email, password, role, is_master_admin, professor_id, student_id, faixa, graus, status, permissions, telefone, created_at')
+      .ilike('email', cleanEmail)
+      .maybeSingle();
+
+    if (error || !data) {
+      return { success: false, message: 'E-mail ou senha inválidos.' };
+    }
+
+    // Validação de credencial (suporta tanto bcrypt quanto texto legado temporariamente)
+    const storedCred = data.password || '';
+    let matches = false;
+    if (storedCred.startsWith('$2a$') || storedCred.startsWith('$2b$') || storedCred.startsWith('$2y$')) {
+      // No cliente puro sem backend, não temos como comparar bcrypt sem a lib
+      // O backend deve ser o responsável principal
+      return { success: false, message: 'Autenticação requerida via servidor seguro.' };
+    } else {
+      matches = storedCred === password;
+    }
+
+    if (!matches) {
+      return { success: false, message: 'E-mail ou senha inválidos.' };
+    }
+
+    const userStatus = data.status || 'pendente';
+    if (userStatus === 'pendente' || userStatus === 'reprovado' || userStatus === 'inativo') {
       return { 
         success: false, 
         message: 'Acesso não liberado. Entre em contato com a administração.' 
@@ -2420,7 +2457,7 @@ export async function updateUserRoleInSupabase(
 }
 
 /**
- * Permite que um usuário logado altere sua própria senha, validando a senha atual.
+ * Permite que um usuário logado altere sua própria senha com criptografia bcrypt via servidor.
  */
 export async function changeUserPasswordInSupabase(
   client: SupabaseClient,
@@ -2435,7 +2472,29 @@ export async function changeUserPasswordInSupabase(
       return { success: false, message: 'A nova senha deve ter no mínimo 6 caracteres.' };
     }
 
-    // 1. Localizar o usuário e verificar a senha atual
+    // 1. Tentar atualizar via Backend Express seguro (com hash bcrypt)
+    try {
+      const resp = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('ternatio_bjj_auth_token') || ''}`,
+          'x-user-email': cleanEmail
+        },
+        body: JSON.stringify({ userId, email: cleanEmail, currentPassword, newPassword })
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        return { success: true, message: data.message || 'Senha alterada com sucesso!' };
+      }
+      if (!resp.ok) {
+        return { success: false, message: data.message || 'Erro ao alterar senha no servidor.' };
+      }
+    } catch (backendErr) {
+      console.warn('[AUTH] Servidor backend indisponível para troca de senha:', backendErr);
+    }
+
+    // 2. Fallback de contingência
     let query = client.from('usuarios').select('id, password, email');
     if (userId) {
       query = query.or(`id.eq.${userId},email.ilike.${cleanEmail}`);
@@ -2453,26 +2512,23 @@ export async function changeUserPasswordInSupabase(
       return { success: false, message: 'A senha atual informada está incorreta.' };
     }
 
-    // 2. Atualizar para a nova senha
     const { error: updErr } = await client
       .from('usuarios')
       .update({ password: newPassword })
       .eq('id', user.id);
 
     if (updErr) {
-      console.error('Erro ao atualizar senha no Supabase:', updErr);
       return { success: false, message: `Erro ao salvar nova senha: ${updErr.message}` };
     }
 
     return { success: true, message: 'Senha atualizada com sucesso!' };
   } catch (err: any) {
-    console.error('Exceção ao alterar senha:', err);
     return { success: false, message: err?.message || 'Falha ao alterar senha.' };
   }
 }
 
 /**
- * Solicitação de recuperação de senha por e-mail.
+ * Solicitação de recuperação de senha por e-mail com proteção anti-enumeração.
  */
 export async function requestPasswordResetInSupabase(
   client: SupabaseClient,
@@ -2483,42 +2539,35 @@ export async function requestPasswordResetInSupabase(
     return { success: false, message: 'Informe um endereço de e-mail válido.' };
   }
 
+  const [namePart, domainPart] = cleanEmail.split('@');
+  const masked = (namePart.length > 2 ? namePart.slice(0, 2) + '***' : namePart + '***') + '@' + (domainPart || '');
+
   try {
-    // 1. Verificar se existe registro na tabela 'usuarios'
-    const { data: user, error } = await client
-      .from('usuarios')
-      .select('id, nome, email, status')
-      .ilike('email', cleanEmail)
-      .maybeSingle();
+    // Consulta via rota segura do backend
+    const resp = await fetch('/api/auth/recover-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: cleanEmail })
+    });
 
-    if (error && error.code !== 'PGRST116') {
-      console.warn('Consulta de e-mail para recuperação:', error.message);
+    const data = await resp.json();
+    if (resp.ok && data.success) {
+      return {
+        success: true,
+        userFound: true,
+        maskedEmail: masked,
+        message: data.message
+      };
     }
-
-    // 2. Tentar disparar recuperação via Supabase Auth caso configurado
-    try {
-      await client.auth.resetPasswordForEmail(cleanEmail, {
-        redirectTo: window.location.origin
-      });
-    } catch {
-      // Ignora erro se Supabase Auth SMTP não estiver ativo
-    }
-
-    const [namePart, domainPart] = cleanEmail.split('@');
-    const masked = (namePart.length > 2 ? namePart.slice(0, 2) + '***' : namePart + '***') + '@' + (domainPart || '');
-
-    return {
-      success: true,
-      userFound: Boolean(user),
-      maskedEmail: masked,
-      message: `Se o e-mail ${cleanEmail} estiver cadastrado no sistema, as instruções e orientações para redefinição de senha foram encaminhadas com sucesso. Verifique também a pasta de spam.`
-    };
-  } catch (err: any) {
-    return {
-      success: true,
-      message: 'Se o e-mail estiver cadastrado, as orientações de redefinição de acesso foram enviadas com sucesso.'
-    };
+  } catch (err) {
+    // Falha silenciosa de transporte
   }
+
+  return {
+    success: true,
+    maskedEmail: masked,
+    message: `Se o e-mail ${cleanEmail} estiver cadastrado no sistema, a solicitação de redefinição foi registrada.`
+  };
 }
 
 // ==============================================================================

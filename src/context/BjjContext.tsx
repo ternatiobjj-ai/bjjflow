@@ -638,6 +638,12 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: result.message };
     }
 
+    if (result.token) {
+      try {
+        localStorage.setItem('ternatio_bjj_auth_token', result.token);
+      } catch {}
+    }
+
     setAllUsers([result.user]);
     setCurrentUser(result.user);
     setIsAuthenticated(true);
@@ -892,6 +898,7 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const logout = async (): Promise<void> => {
     try {
       localStorage.removeItem(STORAGE_PREFIX + 'auth_user');
+      localStorage.removeItem('ternatio_bjj_auth_token');
     } catch {}
     setIsAuthenticated(false);
     setAllUsers([]);
