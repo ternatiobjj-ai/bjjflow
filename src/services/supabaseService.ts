@@ -1627,8 +1627,8 @@ export async function authenticateUserWithSupabase(
     return { success: false, message: 'E-mail ou senha inválidos.' };
   }
 
-  // 1. Tentar autenticação segura via Backend Express (/api/auth/login)
-  // Isso garante que senhas e hashes NUNCA sejam transmitidos para o navegador
+  // A autenticação ocorre EXCLUSIVAMENTE pelo backend (/api/auth/login).
+  // O cliente React NUNCA realiza SELECT de password ou password_hash.
   try {
     const response = await fetch('/api/auth/login', {
       method: 'POST',
@@ -1652,88 +1652,22 @@ export async function authenticateUserWithSupabase(
       };
     }
 
-    if (!response.ok) {
-      return {
-        success: false,
-        message: resJson.message || 'E-mail ou senha inválidos.'
-      };
-    }
+    return {
+      success: false,
+      message: resJson.message || 'E-mail ou senha inválidos.'
+    };
   } catch (backendFetchErr) {
-    // Se o backend Express estiver indisponível no ambiente de execução, log técnico discreto
-    console.warn('[AUTH] Servidor /api não respondeu, tentando consulta direta segura...', backendFetchErr);
-  }
-
-  // 2. Fallback de contingência caso a rota Express não responda
-  try {
-    const { data, error } = await client
-      .from('usuarios')
-      .select('id, nome, email, password, role, is_master_admin, professor_id, student_id, faixa, graus, status, permissions, telefone, created_at')
-      .ilike('email', cleanEmail)
-      .maybeSingle();
-
-    if (error || !data) {
-      return { success: false, message: 'E-mail ou senha inválidos.' };
-    }
-
-    // Validação de credencial (suporta tanto bcrypt quanto texto legado temporariamente)
-    const storedCred = data.password || '';
-    let matches = false;
-    if (storedCred.startsWith('$2a$') || storedCred.startsWith('$2b$') || storedCred.startsWith('$2y$')) {
-      // No cliente puro sem backend, não temos como comparar bcrypt sem a lib
-      // O backend deve ser o responsável principal
-      return { success: false, message: 'Autenticação requerida via servidor seguro.' };
-    } else {
-      matches = storedCred === password;
-    }
-
-    if (!matches) {
-      return { success: false, message: 'E-mail ou senha inválidos.' };
-    }
-
-    const userStatus = data.status || 'pendente';
-    if (userStatus === 'pendente' || userStatus === 'reprovado' || userStatus === 'inativo') {
-      return { 
-        success: false, 
-        message: 'Acesso não liberado. Entre em contato com a administração.' 
-      };
-    }
-
-    const userRole = (data.role || 'aluno') as UserRole;
-    const isMaster = Boolean(data.is_master_admin || userRole === 'admin');
-
-    const user: AuthUser = {
-      id: data.id,
-      nome: data.nome,
-      email: data.email,
-      role: userRole,
-      isMasterAdmin: isMaster,
-      professorId: data.professor_id || undefined,
-      studentId: data.student_id || undefined,
-      faixa: data.faixa || undefined,
-      graus: data.graus || 0,
-      status: userStatus,
-      telefone: data.telefone || undefined,
-      createdAt: data.created_at || undefined,
-      permissions: data.permissions || (
-        userRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS :
-        userRole === 'professor' ? DEFAULT_PROFESSOR_PERMISSIONS :
-        DEFAULT_STUDENT_PERMISSIONS
-      )
+    console.error('[AUTH ERROR] Falha de comunicação com /api/auth/login:', backendFetchErr);
+    return {
+      success: false,
+      message: 'Não foi possível conectar ao servidor de autenticação. Verifique sua conexão e tente novamente.'
     };
-
-    return { 
-      success: true, 
-      message: `Bem-vindo, ${user.nome}!`, 
-      user 
-    };
-  } catch (err: any) {
-    console.error('Falha de conexão com a tabela usuarios:', err?.message);
-    return { success: false, message: 'E-mail ou senha inválidos.' };
   }
 }
 
 /**
- * Registra uma nova solicitação de cadastro na tabela 'usuarios' com status 'pendente'
+ * Registra uma nova solicitação de cadastro via backend (/api/auth/register)
+ * A senha é criptografada com bcrypt (12 rounds) no servidor antes da gravação no banco.
  */
 export async function registerNewUserInSupabase(
   client: SupabaseClient,
@@ -1743,97 +1677,40 @@ export async function registerNewUserInSupabase(
   if (!cleanEmail) {
     return { success: false, message: 'Informe um endereço de e-mail válido.' };
   }
-  if (!reg.password || reg.password.length < 4) {
-    return { success: false, message: 'A senha deve conter no mínimo 4 caracteres.' };
+  if (!reg.password || reg.password.length < 8) {
+    return { success: false, message: 'A senha deve conter no mínimo 8 caracteres.' };
   }
 
   try {
-    // 1. Verificar se já existe conta com esse e-mail
-    const { data: existing, error: checkErr } = await client
-      .from('usuarios')
-      .select('id, email')
-      .eq('email', cleanEmail)
-      .maybeSingle();
+    const resp = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nome: reg.nome.trim(),
+        email: cleanEmail,
+        password: reg.password,
+        role: reg.role,
+        telefone: reg.telefone?.trim(),
+        faixa: reg.faixa,
+        graus: Number(reg.graus || 0)
+      })
+    });
 
-    if (checkErr && checkErr.code !== 'PGRST116') {
-      console.error('Erro ao verificar e-mail existente:', checkErr);
+    const resJson = await resp.json();
+    if (resp.ok && resJson.success) {
+      return { success: true, message: resJson.message };
     }
 
-    if (existing) {
-      return { success: false, message: 'Este endereço de e-mail já está cadastrado no sistema.' };
-    }
-
-    const newUserId = `user-${Date.now()}`;
-    const newRow = {
-      id: newUserId,
-      nome: reg.nome.trim(),
-      email: cleanEmail,
-      password: reg.password,
-      role: reg.role, // 'aluno' | 'professor'
-      status: 'pendente',
-      telefone: reg.telefone?.trim() || null,
-      faixa: reg.faixa,
-      graus: Number(reg.graus || 0),
-      is_master_admin: false,
-      permissions: reg.role === 'professor' ? DEFAULT_PROFESSOR_PERMISSIONS : DEFAULT_STUDENT_PERMISSIONS,
-      created_at: new Date().toISOString()
-    };
-
-    const { error: insertErr } = await client.from('usuarios').insert([newRow]);
-    if (insertErr) {
-      console.error('Erro ao inserir novo cadastro na tabela usuarios:', insertErr);
-      return { success: false, message: `Erro ao enviar cadastro: ${insertErr.message}` };
-    }
-
-    // Se aluno, também cria o perfil preliminar na tabela de alunos caso desejado
-    if (reg.role === 'aluno') {
-      try {
-        const studentId = `aluno-${Date.now()}`;
-        await client.from('alunos').insert([{
-          id: studentId,
-          nome: reg.nome.trim(),
-          email: cleanEmail,
-          telefone: reg.telefone?.trim() || '',
-          faixa: reg.faixa,
-          graus: Number(reg.graus || 0),
-          data_inicio: new Date().toISOString().split('T')[0],
-          data_nascimento: reg.dataNascimento || '2000-01-01',
-          turma_preferida: reg.turmaPreferida || reg.turmaPreferencia || 'Geral',
-          plano: reg.plano || 'regular',
-          status_pagamento: 'pendente'
-        }]);
-        await client.from('usuarios').update({ student_id: studentId }).eq('id', newUserId);
-      } catch (stErr) {
-        console.warn('Criação preliminar em alunos:', stErr);
-      }
-    } else if (reg.role === 'professor') {
-      try {
-        const profId = `inst-${Date.now()}`;
-        await client.from('professores').insert([{
-          id: profId,
-          nome: reg.nome.trim(),
-          email: cleanEmail,
-          telefone: reg.telefone?.trim() || '',
-          faixa: reg.faixa,
-          graus: Number(reg.graus || 0),
-          registro_cbjj: reg.registroCBJJ || null,
-          chave_pix: reg.chavePix || null,
-          bio: reg.bio || null
-        }]);
-        await client.from('usuarios').update({ professor_id: profId }).eq('id', newUserId);
-      } catch (prErr) {
-        console.warn('Criação preliminar em professores:', prErr);
-      }
-    }
-
-    return { 
-      success: true, 
-      message: 'Cadastro enviado! Aguarde a aprovação de um administrador.',
-      userId: newUserId 
+    return {
+      success: false,
+      message: resJson.message || 'Erro ao realizar cadastro.'
     };
   } catch (err: any) {
-    console.error('Exceção ao registrar usuário no Supabase:', err);
-    return { success: false, message: err?.message || 'Falha ao registrar novo usuário.' };
+    console.error('Falha de conexão com /api/auth/register:', err?.message);
+    return {
+      success: false,
+      message: 'Erro ao conectar ao servidor para efetuar o cadastro.'
+    };
   }
 }
 
@@ -2467,63 +2344,44 @@ export async function changeUserPasswordInSupabase(
   newPassword: string
 ): Promise<{ success: boolean; message: string }> {
   try {
-    const cleanEmail = userEmail.trim().toLowerCase();
-    if (!newPassword || newPassword.length < 6) {
-      return { success: false, message: 'A nova senha deve ter no mínimo 6 caracteres.' };
+    if (!newPassword || newPassword.length < 8) {
+      return { success: false, message: 'A nova senha deve possuir no mínimo 8 caracteres.' };
+    }
+    if (!currentPassword) {
+      return { success: false, message: 'A senha atual é obrigatória.' };
     }
 
-    // 1. Tentar atualizar via Backend Express seguro (com hash bcrypt)
-    try {
-      const resp = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('ternatio_bjj_auth_token') || ''}`,
-          'x-user-email': cleanEmail
-        },
-        body: JSON.stringify({ userId, email: cleanEmail, currentPassword, newPassword })
-      });
-      const data = await resp.json();
-      if (resp.ok && data.success) {
-        return { success: true, message: data.message || 'Senha alterada com sucesso!' };
-      }
-      if (!resp.ok) {
-        return { success: false, message: data.message || 'Erro ao alterar senha no servidor.' };
-      }
-    } catch (backendErr) {
-      console.warn('[AUTH] Servidor backend indisponível para troca de senha:', backendErr);
+    const token = localStorage.getItem('ternatio_bjj_auth_token');
+    if (!token) {
+      return { success: false, message: 'Sessão expirada. Faça login novamente antes de alterar a senha.' };
     }
 
-    // 2. Fallback de contingência
-    let query = client.from('usuarios').select('id, password, email');
-    if (userId) {
-      query = query.or(`id.eq.${userId},email.ilike.${cleanEmail}`);
-    } else {
-      query = query.ilike('email', cleanEmail);
+    // A alteração ocorre EXCLUSIVAMENTE pelo backend com verificação Bearer
+    // A conta é identificada pela sessão verificada no servidor, sem aceitar IDs arbitrários do cliente
+    const resp = await fetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ currentPassword, newPassword })
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.success) {
+      return { success: true, message: data.message || 'Senha alterada com sucesso!' };
     }
 
-    const { data: user, error: fetchErr } = await query.maybeSingle();
-
-    if (fetchErr || !user) {
-      return { success: false, message: 'Usuário não encontrado na tabela usuarios.' };
-    }
-
-    if (user.password && user.password !== currentPassword) {
-      return { success: false, message: 'A senha atual informada está incorreta.' };
-    }
-
-    const { error: updErr } = await client
-      .from('usuarios')
-      .update({ password: newPassword })
-      .eq('id', user.id);
-
-    if (updErr) {
-      return { success: false, message: `Erro ao salvar nova senha: ${updErr.message}` };
-    }
-
-    return { success: true, message: 'Senha atualizada com sucesso!' };
-  } catch (err: any) {
-    return { success: false, message: err?.message || 'Falha ao alterar senha.' };
+    return {
+      success: false,
+      message: data.message || 'Erro ao alterar senha no servidor.'
+    };
+  } catch (backendErr: any) {
+    console.error('[AUTH ERROR] Falha ao comunicar com /api/auth/change-password:', backendErr);
+    return {
+      success: false,
+      message: 'Não foi possível conectar ao servidor para alterar a senha. Tente novamente em instantes.'
+    };
   }
 }
 

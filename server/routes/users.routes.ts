@@ -4,11 +4,10 @@ import { requireAdmin } from '../middleware/authMiddleware';
 
 const router = Router();
 
-// Listagem de usuários
-router.get('/', UsersController.listUsers);
-
-// Operações protegidas (requerem privilégios de Administrador)
+// Todas as operações de usuários são restritas a administradores autenticados
+router.get('/', requireAdmin, UsersController.listUsers);
 router.post('/:id/approve', requireAdmin, UsersController.approveUser);
 router.patch('/:id/role', requireAdmin, UsersController.updateRole);
 
 export default router;
+

@@ -344,50 +344,55 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setAuthError(null);
 
-    if (!supabaseConfig.enabled || !supabaseConfig.url || !supabaseConfig.anonKey) return;
-
-    const client = getSupabaseClient(supabaseConfig);
-    if (!client || !savedUser?.email) return;
+    const token = localStorage.getItem('ternatio_bjj_auth_token');
+    if (!token) {
+      setCurrentUser(EMPTY_AUTH_USER);
+      setIsAuthenticated(false);
+      return;
+    }
 
     let cancelled = false;
     (async () => {
       try {
-        const { data, error } = await client
-          .from('usuarios')
-          .select('id, nome, email, role, is_master_admin, professor_id, student_id, faixa, graus, status, permissions')
-          .eq('email', savedUser.email.toLowerCase().trim())
-          .maybeSingle();
+        const resp = await fetch('/api/auth/me', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
 
         if (cancelled) return;
-        if (error || !data) {
-          console.warn('Usuário salvo não encontrado ou erro no Supabase:', error);
-          return;
-        }
 
-        // Se o status for pendente, reprovado ou inativo, encerra o acesso imediatamente
-        if (data.status === 'pendente' || data.status === 'reprovado' || data.status === 'inativo') {
-          console.warn(`Acesso revogado: status do usuário no Supabase é ${data.status}`);
+        if (!resp.ok) {
+          // Sessão inválida, expirada ou revogada no servidor
+          console.warn('[AUTH] Sessão rejeitada pelo servidor. Limpando credenciais locais.');
           setCurrentUser(EMPTY_AUTH_USER);
           setIsAuthenticated(false);
           try {
             localStorage.removeItem(STORAGE_PREFIX + 'auth_user');
+            localStorage.removeItem('ternatio_bjj_auth_token');
           } catch {}
           return;
         }
 
-        const refreshedUser: AuthUser = {
-          ...savedUser,
-          nome: data.nome || savedUser.nome,
-          role: (data.role as UserRole) || savedUser.role,
-          status: data.status,
-          isMasterAdmin: Boolean(data.is_master_admin || data.role === 'admin'),
-          permissions: data.permissions || savedUser.permissions
-        };
-        setCurrentUser(refreshedUser);
-        setIsAuthenticated(true);
-        saveToStorage('auth_user', refreshedUser);
+        const data = await resp.json();
+        if (data.success && data.user) {
+          const verifiedUser: AuthUser = {
+            id: data.user.id,
+            nome: data.user.nome,
+            email: data.user.email,
+            role: data.user.role as UserRole,
+            isMasterAdmin: Boolean(data.user.is_master_admin || data.user.role === 'admin'),
+            professorId: data.user.professor_id,
+            studentId: data.user.student_id,
+            faixa: data.user.faixa,
+            graus: data.user.graus || 0,
+            status: data.user.status,
+            permissions: data.user.permissions
+          };
+          setCurrentUser(verifiedUser);
+          setIsAuthenticated(true);
+          saveToStorage('auth_user', verifiedUser);
+        }
       } catch (err: any) {
-        if (!cancelled) console.warn('Erro ao verificar usuário no Supabase:', err);
+        if (!cancelled) console.warn('[AUTH] Erro ao validar sessão via /api/auth/me:', err);
       }
     })();
 

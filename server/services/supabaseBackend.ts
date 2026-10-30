@@ -1,8 +1,9 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// URL e chave padrão do projeto Ternatio BJJ
-export const BACKEND_SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://rbvyyekrsjfweewgnyuh.supabase.co';
-export const BACKEND_SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_BHPL4Bd5KL9qiURdLevMBQ_C0Ld7-D9';
+// URL e chave do projeto Ternatio BJJ para o backend Express
+export const BACKEND_SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://rbvyyekrsjfweewgnyuh.supabase.co';
+export const BACKEND_SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_BHPL4Bd5KL9qiURdLevMBQ_C0Ld7-D9';
+
 
 let backendClient: SupabaseClient | null = null;
 
