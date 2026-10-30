@@ -18,6 +18,7 @@ import {
   GraduationSystemType,
   StudentEvaluation,
   UserRole,
+  UserPermissions,
   UserRegistrationData,
   DEFAULT_MASTER_PERMISSIONS,
   DEFAULT_ADMIN_PERMISSIONS,
@@ -2170,6 +2171,32 @@ export async function reconcileAllApprovedUsers(
       }
     }
 
+    // Reconciliação específica de André Cuzati e professores promovidos a Administrador
+    try {
+      const { data: profs } = await client.from('professores').select('*');
+      if (profs && profs.length > 0) {
+        for (const prof of profs) {
+          const profEmail = (prof.email || '').toLowerCase().trim();
+          const isAndre = profEmail.includes('acuzati') || (prof.nome && prof.nome.toLowerCase().includes('andré') && prof.nome.toLowerCase().includes('cuzati'));
+          
+          if (isAndre) {
+            const { error: updErr } = await client.from('usuarios').update({
+              role: 'admin',
+              is_master_admin: true,
+              permissions: DEFAULT_ADMIN_PERMISSIONS,
+              professor_id: prof.id
+            }).or(`email.ilike.${profEmail},professor_id.eq.${prof.id}`);
+            
+            if (!updErr) {
+              reconciledCount++;
+            }
+          }
+        }
+      }
+    } catch (profRecErr) {
+      console.warn('Erro ao verificar perfis de professores na reconciliação:', profRecErr);
+    }
+
     return { success: true, reconciledCount, errors };
   } catch (err: any) {
     return { success: false, reconciledCount, errors: [err?.message || 'Exceção na reconciliação'] };
@@ -2177,23 +2204,48 @@ export async function reconcileAllApprovedUsers(
 }
 
 export async function fetchInstructorsFromSupabase(client: SupabaseClient): Promise<Instructor[]> {
-  const { data, error } = await client.from('professores').select('*').order('nome');
-  if (error || !data) return [];
-  return data.map(r => ({
-    id: r.id,
-    nome: r.nome,
-    faixa: (r.faixa as BeltColor) || 'preta',
-    graus: Number(r.graus || 0),
-    email: r.email || '',
-    telefone: r.telefone || '',
-    foto: r.foto || undefined,
-    registroCBJJ: r.registro_cbjj || '',
-    bio: r.bio || '',
-    turmas: Array.isArray(r.turmas) ? r.turmas : [],
-    chavePix: r.chave_pix || '',
-    banco: r.banco || '',
-    sistemaGraduacao: (r.sistema_graduacao as GraduationSystemType) || 'graus_e_faixas'
-  }));
+  try {
+    const [profRes, usersRes] = await Promise.all([
+      client.from('professores').select('*').order('nome'),
+      client.from('usuarios').select('id, email, role, permissions, is_master_admin, professor_id')
+    ]);
+
+    const data = profRes.data || [];
+    const users = usersRes.data || [];
+
+    return data.map(r => {
+      const cleanEmail = (r.email || '').toLowerCase().trim();
+      const matchedUser = users.find(u => 
+        (u.professor_id && u.professor_id === r.id) ||
+        (u.email && cleanEmail && u.email.toLowerCase().trim() === cleanEmail)
+      );
+
+      const resolvedRole: UserRole = (matchedUser?.role as UserRole) || 'professor';
+      const defaultPerms = resolvedRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS;
+      const resolvedPerms = matchedUser?.permissions || defaultPerms;
+
+      return {
+        id: r.id,
+        nome: r.nome,
+        faixa: (r.faixa as BeltColor) || 'preta',
+        graus: Number(r.graus || 0),
+        email: r.email || '',
+        telefone: r.telefone || '',
+        foto: r.foto || undefined,
+        registroCBJJ: r.registro_cbjj || '',
+        bio: r.bio || '',
+        turmas: Array.isArray(r.turmas) ? r.turmas : [],
+        chavePix: r.chave_pix || '',
+        banco: r.banco || '',
+        sistemaGraduacao: (r.sistema_graduacao as GraduationSystemType) || 'graus_e_faixas',
+        role: resolvedRole,
+        permissions: resolvedPerms
+      };
+    });
+  } catch (err) {
+    console.warn('Erro ao buscar professores e usuários no Supabase:', err);
+    return [];
+  }
 }
 
 export async function fetchStudentsFromSupabase(client: SupabaseClient): Promise<Student[]> {
@@ -2256,6 +2308,216 @@ export async function saveUserToSupabase(
   } catch (err: any) {
     console.error('Exceção ao salvar usuário no Supabase:', err);
     return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Atualiza o perfil e privilégios de acesso do usuário diretamente na tabela 'usuarios' do Supabase.
+ * Localiza o registro por ID, e-mail ou professor_id.
+ */
+export async function updateUserRoleInSupabase(
+  client: SupabaseClient,
+  params: {
+    userId?: string;
+    email?: string;
+    professorId?: string;
+    studentId?: string;
+    role: UserRole;
+    permissions?: UserPermissions;
+    nome?: string;
+    faixa?: string;
+    graus?: number;
+    telefone?: string;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const targetEmail = params.email?.toLowerCase().trim();
+    const isMaster = params.role === 'admin';
+    const finalPermissions = params.permissions || (
+      params.role === 'admin' ? DEFAULT_ADMIN_PERMISSIONS :
+      params.role === 'professor' ? DEFAULT_PROFESSOR_PERMISSIONS :
+      DEFAULT_STUDENT_PERMISSIONS
+    );
+
+    // 1. Tentar atualizar por userId se informado
+    if (params.userId) {
+      const { error, data } = await client
+        .from('usuarios')
+        .update({
+          role: params.role,
+          is_master_admin: isMaster,
+          permissions: finalPermissions,
+          professor_id: params.professorId || null,
+          student_id: params.studentId || null,
+          ...(params.nome ? { nome: params.nome } : {}),
+          ...(params.faixa ? { faixa: params.faixa } : {}),
+          ...(params.graus !== undefined ? { graus: params.graus } : {})
+        })
+        .eq('id', params.userId)
+        .select();
+
+      if (!error && data && data.length > 0) {
+        return { success: true };
+      }
+    }
+
+    // 2. Tentar atualizar por email ou professor_id
+    if (targetEmail || params.professorId) {
+      let query = client.from('usuarios').update({
+        role: params.role,
+        is_master_admin: isMaster,
+        permissions: finalPermissions,
+        ...(params.professorId ? { professor_id: params.professorId } : {}),
+        ...(params.studentId ? { student_id: params.studentId } : {}),
+        ...(params.nome ? { nome: params.nome } : {}),
+        ...(params.faixa ? { faixa: params.faixa } : {}),
+        ...(params.graus !== undefined ? { graus: params.graus } : {})
+      });
+
+      if (targetEmail && params.professorId) {
+        query = query.or(`email.ilike.${targetEmail},professor_id.eq.${params.professorId}`);
+      } else if (targetEmail) {
+        query = query.ilike('email', targetEmail);
+      } else if (params.professorId) {
+        query = query.eq('professor_id', params.professorId);
+      }
+
+      const { error: updErr, data: updData } = await query.select();
+      if (!updErr && updData && updData.length > 0) {
+        return { success: true };
+      }
+    }
+
+    // 3. Se não existia ainda em 'usuarios', cria o registro com o novo perfil
+    if (targetEmail) {
+      const newUserId = params.userId || `user-${params.professorId || Date.now()}`;
+      const { error: insErr } = await client.from('usuarios').upsert([{
+        id: newUserId,
+        nome: params.nome || targetEmail.split('@')[0],
+        email: targetEmail,
+        role: params.role,
+        is_master_admin: isMaster,
+        permissions: finalPermissions,
+        professor_id: params.professorId || null,
+        student_id: params.studentId || null,
+        faixa: params.faixa || null,
+        graus: params.graus || 0,
+        status: 'aprovado',
+        telefone: params.telefone || null
+      }], { onConflict: 'id' });
+
+      if (insErr) {
+        console.error('Erro ao inserir usuário com novo perfil:', insErr);
+        return { success: false, error: insErr.message };
+      }
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Exceção ao atualizar perfil do usuário no Supabase:', err);
+    return { success: false, error: err?.message };
+  }
+}
+
+/**
+ * Permite que um usuário logado altere sua própria senha, validando a senha atual.
+ */
+export async function changeUserPasswordInSupabase(
+  client: SupabaseClient,
+  userId: string,
+  userEmail: string,
+  currentPassword: string,
+  newPassword: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const cleanEmail = userEmail.trim().toLowerCase();
+    if (!newPassword || newPassword.length < 6) {
+      return { success: false, message: 'A nova senha deve ter no mínimo 6 caracteres.' };
+    }
+
+    // 1. Localizar o usuário e verificar a senha atual
+    let query = client.from('usuarios').select('id, password, email');
+    if (userId) {
+      query = query.or(`id.eq.${userId},email.ilike.${cleanEmail}`);
+    } else {
+      query = query.ilike('email', cleanEmail);
+    }
+
+    const { data: user, error: fetchErr } = await query.maybeSingle();
+
+    if (fetchErr || !user) {
+      return { success: false, message: 'Usuário não encontrado na tabela usuarios.' };
+    }
+
+    if (user.password && user.password !== currentPassword) {
+      return { success: false, message: 'A senha atual informada está incorreta.' };
+    }
+
+    // 2. Atualizar para a nova senha
+    const { error: updErr } = await client
+      .from('usuarios')
+      .update({ password: newPassword })
+      .eq('id', user.id);
+
+    if (updErr) {
+      console.error('Erro ao atualizar senha no Supabase:', updErr);
+      return { success: false, message: `Erro ao salvar nova senha: ${updErr.message}` };
+    }
+
+    return { success: true, message: 'Senha atualizada com sucesso!' };
+  } catch (err: any) {
+    console.error('Exceção ao alterar senha:', err);
+    return { success: false, message: err?.message || 'Falha ao alterar senha.' };
+  }
+}
+
+/**
+ * Solicitação de recuperação de senha por e-mail.
+ */
+export async function requestPasswordResetInSupabase(
+  client: SupabaseClient,
+  email: string
+): Promise<{ success: boolean; message: string; userFound?: boolean; maskedEmail?: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail) {
+    return { success: false, message: 'Informe um endereço de e-mail válido.' };
+  }
+
+  try {
+    // 1. Verificar se existe registro na tabela 'usuarios'
+    const { data: user, error } = await client
+      .from('usuarios')
+      .select('id, nome, email, status')
+      .ilike('email', cleanEmail)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {
+      console.warn('Consulta de e-mail para recuperação:', error.message);
+    }
+
+    // 2. Tentar disparar recuperação via Supabase Auth caso configurado
+    try {
+      await client.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: window.location.origin
+      });
+    } catch {
+      // Ignora erro se Supabase Auth SMTP não estiver ativo
+    }
+
+    const [namePart, domainPart] = cleanEmail.split('@');
+    const masked = (namePart.length > 2 ? namePart.slice(0, 2) + '***' : namePart + '***') + '@' + (domainPart || '');
+
+    return {
+      success: true,
+      userFound: Boolean(user),
+      maskedEmail: masked,
+      message: `Se o e-mail ${cleanEmail} estiver cadastrado no sistema, as instruções e orientações para redefinição de senha foram encaminhadas com sucesso. Verifique também a pasta de spam.`
+    };
+  } catch (err: any) {
+    return {
+      success: true,
+      message: 'Se o e-mail estiver cadastrado, as orientações de redefinição de acesso foram enviadas com sucesso.'
+    };
   }
 }
 

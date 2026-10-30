@@ -29,13 +29,14 @@ export const Login: React.FC = () => {
   const { 
     loginWithEmailAndPassword, 
     registerUser, 
+    requestPasswordReset,
     academySettings, 
     supabaseConfig, 
     authError 
   } = useBjj();
 
-  // Mode: 'login' | 'register'
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  // Mode: 'login' | 'register' | 'recovery'
+  const [mode, setMode] = useState<'login' | 'register' | 'recovery'>('login');
 
   // Login form state
   const [email, setEmail] = useState('');
@@ -43,6 +44,12 @@ export const Login: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Recovery form state
+  const [recoveryEmail, setRecoveryEmail] = useState('');
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [recoverySuccess, setRecoverySuccess] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
 
   // Registration form state
   const [regRole, setRegRole] = useState<'professor' | 'aluno'>('aluno');
@@ -91,6 +98,33 @@ export const Login: React.FC = () => {
       setErrorMessage('E-mail ou senha inválidos.');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Handle Recovery Submit
+  const handleRecoverySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryError(null);
+    setRecoverySuccess(null);
+
+    const cleanEmail = recoveryEmail.trim().toLowerCase();
+    if (!cleanEmail) {
+      setRecoveryError('Informe o seu endereço de e-mail cadastrado.');
+      return;
+    }
+
+    setRecoveryLoading(true);
+    try {
+      const res = await requestPasswordReset(cleanEmail);
+      if (res.success) {
+        setRecoverySuccess(res.message);
+      } else {
+        setRecoveryError(res.message);
+      }
+    } catch {
+      setRecoveryError('Não foi possível processar a recuperação de senha no momento. Tente novamente mais tarde.');
+    } finally {
+      setRecoveryLoading(false);
     }
   };
 
@@ -255,6 +289,19 @@ export const Login: React.FC = () => {
                     >
                       Senha
                     </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode('recovery');
+                        setRecoveryEmail(email);
+                        setRecoveryError(null);
+                        setRecoverySuccess(null);
+                        setErrorMessage(null);
+                      }}
+                      className="text-xs text-amber-500 hover:text-amber-400 font-semibold transition-colors cursor-pointer"
+                    >
+                      Esqueceu sua senha?
+                    </button>
                   </div>
                   <div className="relative">
                     <input
@@ -684,17 +731,125 @@ export const Login: React.FC = () => {
             </div>
           )}
 
-          {/* Database & Security Notice */}
-          <div className="pt-4 border-t border-theme space-y-2">
-            <div className="flex items-center gap-2 text-[11px] text-theme-muted">
-              <Database className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>Autenticação direta pela tabela <code className="text-amber-400 font-mono">usuarios</code> do Supabase.</span>
+          {/* MODE 3: RECUPERAÇÃO DE SENHA */}
+          {mode === 'recovery' && (
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-theme-main flex items-center gap-2">
+                    <Key className="w-4 h-4 text-amber-500" />
+                    Recuperação de Acesso
+                  </h2>
+                  <p className="text-xs text-theme-muted">
+                    Informe seu e-mail para receber as instruções e orientações de redefinição de senha.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('login');
+                    setRecoveryError(null);
+                    setRecoverySuccess(null);
+                  }}
+                  className="p-2 rounded-xl text-theme-muted hover:text-theme-main hover:bg-theme-app transition-colors cursor-pointer"
+                  title="Voltar ao login"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
+              </div>
+
+              {recoveryError && (
+                <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/80 text-rose-200 text-xs flex items-start gap-2.5 animate-in fade-in duration-200">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed font-medium">{recoveryError}</span>
+                </div>
+              )}
+
+              {recoverySuccess ? (
+                <div className="space-y-4 py-4 text-center">
+                  <div className="w-14 h-14 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 mx-auto flex items-center justify-center">
+                    <CheckCircle2 className="w-8 h-8" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-bold text-theme-main">Solicitação Enviada com Sucesso!</h3>
+                    <p className="text-xs text-emerald-400 font-semibold leading-relaxed">
+                      {recoverySuccess}
+                    </p>
+                    <p className="text-[11px] text-theme-muted max-w-sm mx-auto pt-2">
+                      Caso não localize na sua caixa principal, verifique a pasta de spam ou consulte a administração da academia.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('login');
+                      setRecoverySuccess(null);
+                    }}
+                    className="w-full bg-theme-accent hover:opacity-90 text-white font-bold text-xs py-3 px-4 rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    <span>Voltar à Tela de Login</span>
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleRecoverySubmit} className="space-y-4">
+                  <div>
+                    <label 
+                      htmlFor="recovery-email" 
+                      className="block text-xs font-semibold text-theme-muted mb-1.5"
+                    >
+                      E-mail Cadastrado
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="recovery-email"
+                        type="email"
+                        value={recoveryEmail}
+                        onChange={(e) => setRecoveryEmail(e.target.value)}
+                        placeholder="seu.email@exemplo.com"
+                        className="w-full bg-theme-app border border-theme focus:border-amber-400 focus:ring-2 focus:ring-amber-400/20 text-theme-main rounded-xl px-3.5 py-3 pl-10 text-sm transition-all outline-none"
+                        required
+                        disabled={recoveryLoading}
+                      />
+                      <Mail className="w-4 h-4 text-theme-muted absolute left-3.5 top-3.5 pointer-events-none" />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={recoveryLoading}
+                    className="w-full bg-theme-accent hover:opacity-90 disabled:opacity-50 text-white font-black text-sm py-3 px-4 rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer mt-4"
+                  >
+                    {recoveryLoading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Verificando e Enviando...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Enviar Instruções de Recuperação</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-center pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode('login');
+                        setRecoveryError(null);
+                        setRecoverySuccess(null);
+                      }}
+                      className="text-xs text-theme-muted hover:text-theme-main underline transition-colors cursor-pointer"
+                    >
+                      Lembrou sua senha? Voltar ao Login
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
-            <div className="flex items-center gap-2 text-[11px] text-theme-muted">
-              <ShieldCheck className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>Acesso restrito a usuários com status <span className="text-emerald-400 font-semibold">aprovado</span>.</span>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Footer info */}

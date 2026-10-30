@@ -62,7 +62,10 @@ import {
   reconcileAllApprovedUsers,
   fetchInstructorsFromSupabase,
   fetchStudentsFromSupabase,
-  saveUserToSupabase, 
+  saveUserToSupabase,
+  updateUserRoleInSupabase,
+  changeUserPasswordInSupabase,
+  requestPasswordResetInSupabase,
   fetchPaymentsFromSupabase, 
   savePaymentToSupabase,
   saveStudentToSupabase,
@@ -94,6 +97,8 @@ interface BjjContextType {
   rejectUser: (userId: string) => Promise<{ success: boolean; error?: string }>;
   registerUser: (regData: UserRegistrationData) => Promise<{ success: boolean; message: string; userId?: string }>;
   loginWithEmailAndPassword: (email: string, password: string) => Promise<{ success: boolean; message: string; user?: AuthUser }>;
+  changeCurrentUserPassword: (currentPassword: string, newPassword: string) => Promise<{ success: boolean; message: string }>;
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; message: string; userFound?: boolean }>;
   updateUser: (userId: string, partialUser: Partial<AuthUser>) => void;
   updateUserPermissions: (userId: string, permissions: Partial<UserPermissions>) => void;
   updateUserRole: (userId: string, newRole: UserRole) => void;
@@ -391,7 +396,7 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [supabaseConfig.enabled, supabaseConfig.url, supabaseConfig.anonKey]);
 
-  // Auto-sync remote instructors, students and reconcile approved users
+  // Auto-sync remote instructors, students, all users and reconcile approved users
   useEffect(() => {
     if (!supabaseConfig.url || !supabaseConfig.anonKey) return;
     const client = getSupabaseClient(supabaseConfig);
@@ -400,9 +405,10 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let cancelled = false;
     (async () => {
       try {
-        const [remoteInsts, remoteStudents] = await Promise.all([
+        const [remoteInsts, remoteStudents, remoteUsersRes] = await Promise.all([
           fetchInstructorsFromSupabase(client),
-          fetchStudentsFromSupabase(client)
+          fetchStudentsFromSupabase(client),
+          fetchUsersFromSupabase(client)
         ]);
 
         if (cancelled) return;
@@ -437,8 +443,40 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
 
-        // Run idempotent reconciliation for approved users
+        if (remoteUsersRes && remoteUsersRes.success && remoteUsersRes.users && remoteUsersRes.users.length > 0) {
+          setAllUsers(remoteUsersRes.users);
+        }
+
+        // Run idempotent reconciliation for approved users & André's admin status
         await reconcileAllApprovedUsers(client);
+
+        // If currentUser is logged in, refresh role and permissions from usuarios
+        const savedAuth = loadFromStorage<AuthUser | null>('auth_user', null);
+        if (savedAuth && savedAuth.email) {
+          const { data: freshUser } = await client
+            .from('usuarios')
+            .select('id, nome, email, role, is_master_admin, permissions, professor_id, student_id, faixa, graus')
+            .ilike('email', savedAuth.email.toLowerCase().trim())
+            .maybeSingle();
+
+          if (!cancelled && freshUser) {
+            const resolvedRole = (freshUser.role as UserRole) || savedAuth.role;
+            const updatedCurrent: AuthUser = {
+              ...savedAuth,
+              id: freshUser.id,
+              nome: freshUser.nome || savedAuth.nome,
+              role: resolvedRole,
+              isMasterAdmin: Boolean(freshUser.is_master_admin || resolvedRole === 'admin'),
+              permissions: freshUser.permissions || (resolvedRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : savedAuth.permissions),
+              professorId: freshUser.professor_id || savedAuth.professorId,
+              studentId: freshUser.student_id || savedAuth.studentId,
+              faixa: freshUser.faixa || savedAuth.faixa,
+              graus: freshUser.graus !== undefined ? freshUser.graus : savedAuth.graus
+            };
+            setCurrentUser(updatedCurrent);
+            saveToStorage('auth_user', updatedCurrent);
+          }
+        }
       } catch (err) {
         console.warn('Erro ao carregar dados remotos do Supabase na inicialização:', err);
       }
@@ -744,25 +782,76 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   };
 
-  const updateUserRole = (userId: string, newRole: UserRole) => {
+  const updateUserRole = async (userId: string, newRole: UserRole) => {
+    let defaultPerms = DEFAULT_STUDENT_PERMISSIONS;
+    if (newRole === 'admin') defaultPerms = DEFAULT_ADMIN_PERMISSIONS;
+    if (newRole === 'professor') defaultPerms = DEFAULT_PROFESSOR_PERMISSIONS;
+
     setAllUsers(prev => prev.map(u => {
       if (u.id === userId) {
-        let defaultPerms = DEFAULT_STUDENT_PERMISSIONS;
-        if (newRole === 'admin') defaultPerms = DEFAULT_ADMIN_PERMISSIONS;
-        if (newRole === 'professor') defaultPerms = DEFAULT_PROFESSOR_PERMISSIONS;
-
         const updated = {
           ...u,
           role: newRole,
+          isMasterAdmin: newRole === 'admin',
           permissions: { ...defaultPerms, ...(u.permissions || {}) }
         };
         if (currentUser.id === userId) {
           setCurrentUser(updated);
+          saveToStorage('auth_user', updated);
         }
         return updated;
       }
       return u;
     }));
+
+    if (supabaseConfig.url && supabaseConfig.anonKey) {
+      const client = getSupabaseClient(supabaseConfig);
+      if (client) {
+        await updateUserRoleInSupabase(client, {
+          userId,
+          role: newRole,
+          permissions: defaultPerms
+        });
+      }
+    }
+  };
+
+  const changeCurrentUserPassword = async (
+    currentPassword: string, 
+    newPassword: string
+  ): Promise<{ success: boolean; message: string }> => {
+    if (!currentUser.email) {
+      return { success: false, message: 'Nenhum usuário conectado.' };
+    }
+    if (!supabaseConfig.url || !supabaseConfig.anonKey) {
+      return { success: false, message: 'Supabase não configurado.' };
+    }
+    const client = getSupabaseClient(supabaseConfig);
+    if (!client) {
+      return { success: false, message: 'Falha ao inicializar Supabase.' };
+    }
+
+    return changeUserPasswordInSupabase(
+      client,
+      currentUser.id,
+      currentUser.email,
+      currentPassword,
+      newPassword
+    );
+  };
+
+  const requestPasswordReset = async (
+    email: string
+  ): Promise<{ success: boolean; message: string; userFound?: boolean }> => {
+    if (!supabaseConfig.url || !supabaseConfig.anonKey) {
+      return { success: false, message: 'Supabase não configurado.' };
+    }
+    const client = getSupabaseClient(supabaseConfig);
+    if (!client) {
+      return { success: false, message: 'Falha ao inicializar Supabase.' };
+    }
+
+    return requestPasswordResetInSupabase(client, email);
   };
 
   const addUser = (userData: Omit<AuthUser, 'id'>): AuthUser => {
@@ -1500,7 +1589,7 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const existing = instructors.find(i => i.id === id);
     if (!existing) return { success: false, error: 'Professor não encontrado.' };
 
-    const nextRole = accessConfig?.role || updated.role || existing.role;
+    const nextRole: UserRole = accessConfig?.role || updated.role || existing.role || 'professor';
     const basePerms = existing.permissions || (nextRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS);
     const nextPerms: UserPermissions | undefined = accessConfig?.permissions 
       ? { ...basePerms, ...accessConfig.permissions } 
@@ -1526,33 +1615,84 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setInstructors(prev => prev.map(i => i.id === id ? mergedInst : i));
 
-    setAllUsers(prev => prev.map(u => {
-      if (u.professorId === id || u.id === `user-${id}`) {
-        const updatedUser: AuthUser = {
-          ...u,
-          nome: updated.nome || u.nome,
-          email: (updated.email || u.email).toLowerCase().trim(),
-          faixa: updated.faixa || u.faixa,
-          graus: updated.graus !== undefined ? updated.graus : u.graus,
-          role: nextRole || u.role,
-          permissions: nextPerms
-        };
+    const profEmail = (updated.email || existing.email).toLowerCase().trim();
 
-        if (currentUser.id === u.id || currentUser.professorId === id) {
-          setCurrentUser(updatedUser);
-        }
-
-        if (supabaseConfig.url && supabaseConfig.anonKey) {
-          const client = getSupabaseClient(supabaseConfig);
-          if (client) {
-            saveUserToSupabase(client, updatedUser);
-          }
-        }
-
-        return updatedUser;
+    // 1. Persistir alteração de perfil e privilégios na tabela 'usuarios' do Supabase
+    if (supabaseConfig.url && supabaseConfig.anonKey) {
+      const client = getSupabaseClient(supabaseConfig);
+      if (client) {
+        await updateUserRoleInSupabase(client, {
+          email: profEmail,
+          professorId: id,
+          role: nextRole,
+          permissions: nextPerms,
+          nome: updated.nome || existing.nome,
+          faixa: updated.faixa || existing.faixa,
+          graus: updated.graus !== undefined ? Number(updated.graus) : Number(existing.graus || 0),
+          telefone: updated.telefone || existing.telefone
+        });
       }
-      return u;
-    }));
+    }
+
+    // 2. Atualizar currentUser se o usuário conectado for este professor
+    const isCurrentLoggedIn = 
+      (currentUser.professorId && currentUser.professorId === id) ||
+      (currentUser.email && currentUser.email.toLowerCase().trim() === profEmail);
+
+    if (isCurrentLoggedIn) {
+      const updatedCurrent: AuthUser = {
+        ...currentUser,
+        role: nextRole,
+        isMasterAdmin: nextRole === 'admin',
+        permissions: nextPerms || (nextRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS),
+        nome: updated.nome || currentUser.nome,
+        email: profEmail,
+        faixa: updated.faixa || currentUser.faixa,
+        graus: updated.graus !== undefined ? Number(updated.graus) : currentUser.graus,
+        professorId: id
+      };
+      setCurrentUser(updatedCurrent);
+      saveToStorage('auth_user', updatedCurrent);
+    }
+
+    // 3. Atualizar lista allUsers
+    setAllUsers(prev => {
+      const exists = prev.some(u => 
+        (u.professorId && u.professorId === id) || 
+        (u.email && u.email.toLowerCase().trim() === profEmail)
+      );
+
+      if (exists) {
+        return prev.map(u => {
+          if ((u.professorId && u.professorId === id) || (u.email && u.email.toLowerCase().trim() === profEmail)) {
+            return {
+              ...u,
+              nome: updated.nome || u.nome,
+              email: profEmail,
+              faixa: updated.faixa || u.faixa,
+              graus: updated.graus !== undefined ? Number(updated.graus) : u.graus,
+              role: nextRole,
+              isMasterAdmin: nextRole === 'admin',
+              permissions: nextPerms || (nextRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS),
+              professorId: id
+            };
+          }
+          return u;
+        });
+      } else {
+        const newUser: AuthUser = {
+          id: `user-${id}`,
+          nome: updated.nome || existing.nome,
+          email: profEmail,
+          role: nextRole,
+          isMasterAdmin: nextRole === 'admin',
+          permissions: nextPerms || (nextRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS),
+          status: 'aprovado',
+          professorId: id
+        };
+        return [newUser, ...prev];
+      }
+    });
 
     // Cascade name changes
     if (updated.nome) {
@@ -2412,6 +2552,8 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       rejectUser,
       registerUser,
       loginWithEmailAndPassword,
+      changeCurrentUserPassword,
+      requestPasswordReset,
       updateUser,
       updateUserPermissions,
       updateUserRole,

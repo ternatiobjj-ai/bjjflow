@@ -25,6 +25,7 @@ import {
   LogIn,
   LogOut,
   RefreshCw,
+  Key,
   UserCheck,
   Building2,
   Clock,
@@ -36,6 +37,7 @@ import {
 import { useBjj } from '../../context/BjjContext';
 import { BeltBadge } from '../ui/BeltBadge';
 import { LoginModal } from '../auth/LoginModal';
+import { ChangePasswordModal } from '../auth/ChangePasswordModal';
 import { TernatioLogo } from '../ui/TernatioLogo';
 import { ThemeSelector } from '../ui/ThemeSelector';
 
@@ -58,6 +60,7 @@ export const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children })
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const [changePasswordModalOpen, setChangePasswordModalOpen] = useState(false);
   const { 
     students, 
     payments, 
@@ -625,15 +628,22 @@ export const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children })
 
             <div className="flex items-center gap-1 shrink-0">
               <button
+                onClick={() => setChangePasswordModalOpen(true)}
+                className="text-theme-muted hover:text-amber-500 p-1.5 rounded-lg hover:bg-theme-card-hover transition-colors cursor-pointer"
+                title="Alterar minha senha"
+              >
+                <Key className="w-4 h-4" />
+              </button>
+              <button
                 onClick={() => setLoginModalOpen(true)}
-                className="text-theme-muted hover:text-theme-main p-1.5 rounded-lg hover:bg-theme-card-hover transition-colors"
+                className="text-theme-muted hover:text-theme-main p-1.5 rounded-lg hover:bg-theme-card-hover transition-colors cursor-pointer"
                 title="Alternar login / perfil"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
               <button
                 onClick={logout}
-                className="text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 p-1.5 rounded-lg transition-colors"
+                className="text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 p-1.5 rounded-lg transition-colors cursor-pointer"
                 title="Encerrar sessão (Sair)"
               >
                 <LogOut className="w-4 h-4" />
@@ -696,6 +706,16 @@ export const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children })
               </div>
             </div>
 
+            {/* Change password button in topbar */}
+            <button
+              onClick={() => setChangePasswordModalOpen(true)}
+              className="flex items-center gap-1.5 text-xs font-bold text-theme-muted hover:text-theme-main bg-theme-card hover:opacity-90 border border-theme px-2.5 py-1.5 rounded-xl transition-all shadow-2xs cursor-pointer"
+              title="Alterar minha senha"
+            >
+              <Key className="w-3.5 h-3.5 text-amber-500" />
+              <span className="hidden lg:inline">Alterar Senha</span>
+            </button>
+
             {/* Logout button in topbar */}
             <button
               onClick={logout}
@@ -719,6 +739,12 @@ export const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children })
       <LoginModal 
         isOpen={loginModalOpen} 
         onClose={() => setLoginModalOpen(false)} 
+      />
+
+      {/* Change Password Modal */}
+      <ChangePasswordModal 
+        isOpen={changePasswordModalOpen} 
+        onClose={() => setChangePasswordModalOpen(false)} 
       />
     </div>
   );
