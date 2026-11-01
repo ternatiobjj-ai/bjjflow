@@ -452,35 +452,11 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setAllUsers(remoteUsersRes.users);
         }
 
-        // Run idempotent reconciliation for approved users & André's admin status
-        await reconcileAllApprovedUsers(client);
-
-        // If currentUser is logged in, refresh role and permissions from usuarios
+        // Se usuário logado for administrador, executa reconciliação idempotente via backend
+        const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
         const savedAuth = loadFromStorage<AuthUser | null>('auth_user', null);
-        if (savedAuth && savedAuth.email) {
-          const { data: freshUser } = await client
-            .from('usuarios')
-            .select('id, nome, email, role, is_master_admin, permissions, professor_id, student_id, faixa, graus')
-            .ilike('email', savedAuth.email.toLowerCase().trim())
-            .maybeSingle();
-
-          if (!cancelled && freshUser) {
-            const resolvedRole = (freshUser.role as UserRole) || savedAuth.role;
-            const updatedCurrent: AuthUser = {
-              ...savedAuth,
-              id: freshUser.id,
-              nome: freshUser.nome || savedAuth.nome,
-              role: resolvedRole,
-              isMasterAdmin: Boolean(freshUser.is_master_admin || resolvedRole === 'admin'),
-              permissions: freshUser.permissions || (resolvedRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : savedAuth.permissions),
-              professorId: freshUser.professor_id || savedAuth.professorId,
-              studentId: freshUser.student_id || savedAuth.studentId,
-              faixa: freshUser.faixa || savedAuth.faixa,
-              graus: freshUser.graus !== undefined ? freshUser.graus : savedAuth.graus
-            };
-            setCurrentUser(updatedCurrent);
-            saveToStorage('auth_user', updatedCurrent);
-          }
+        if (token && savedAuth && savedAuth.role === 'admin') {
+          await reconcileAllApprovedUsers(client);
         }
       } catch (err) {
         console.warn('Erro ao carregar dados remotos do Supabase na inicialização:', err);

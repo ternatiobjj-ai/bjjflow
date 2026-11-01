@@ -307,12 +307,16 @@ export class AuthController {
         const tokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
         const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-        await client.from('password_reset_tokens').insert({
-          user_id: user.id,
-          token_hash: tokenHash,
-          expires_at: expiresAt,
-          used: false
-        }).catch(() => {});
+        try {
+          await client.from('password_reset_tokens').insert({
+            user_id: user.id,
+            token_hash: tokenHash,
+            expires_at: expiresAt,
+            used: false
+          });
+        } catch {
+          // Token table might not exist yet; gracefully handled
+        }
       }
 
       // Resposta transparente e honesta
@@ -357,8 +361,7 @@ export class AuthController {
         return;
       }
 
-      const { password: _, ...safeUser } = user;
-      res.json({ success: true, user: safeUser });
+      res.json({ success: true, user });
     } catch (err: any) {
       res.status(500).json({ success: false, message: 'Erro ao validar sessão.', details: err?.message });
     }

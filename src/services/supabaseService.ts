@@ -591,64 +591,48 @@ export function getSupabaseClient(config?: Partial<SupabaseConfig>): SupabaseCli
   }
 }
 
-async function loadUserProfile(client: SupabaseClient, authUserId: string, authEmail?: string): Promise<AuthUser> {
-  // 1. Try finding by auth user ID
-  let { data, error } = await client
-    .from('usuarios')
-    .select('id,nome,email,role,is_master_admin,professor_id,student_id,faixa,graus,status,permissions')
-    .eq('id', authUserId)
-    .maybeSingle();
-
-  // 2. If not found by ID, try finding by email
-  if (!data && authEmail) {
-    const cleanMail = authEmail.trim().toLowerCase();
-    const emailRes = await client
-      .from('usuarios')
-      .select('id,nome,email,role,is_master_admin,professor_id,student_id,faixa,graus,status,permissions')
-      .eq('email', cleanMail)
-      .maybeSingle();
-    if (emailRes.data) {
-      data = emailRes.data;
+async function loadUserProfile(_client: SupabaseClient, authUserId: string, authEmail?: string): Promise<AuthUser> {
+  const token = localStorage.getItem('bjjflow_token');
+  if (token) {
+    try {
+      const resp = await fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.success && data.user) {
+          const isMaster = Boolean(data.user.is_master_admin || data.user.role === 'admin');
+          return {
+            id: data.user.id || authUserId,
+            nome: data.user.nome || 'Usuário',
+            email: data.user.email || authEmail || '',
+            role: data.user.role as UserRole,
+            isMasterAdmin: isMaster,
+            professorId: data.user.professor_id || undefined,
+            studentId: data.user.student_id || undefined,
+            faixa: data.user.faixa || undefined,
+            graus: data.user.graus || 0,
+            status: data.user.status || 'ativo',
+            permissions: data.user.permissions || undefined
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao validar sessão via /api/auth/me:', err);
     }
   }
 
-  if (error && !data) {
-    throw new Error(`Não foi possível carregar o perfil de acesso: ${error.message}`);
-  }
-  if (!data) {
-    throw new Error('Conta autenticada sem perfil cadastrado. Solicite ao administrador o vínculo do usuário no Supabase.');
-  }
-  if (!['admin', 'professor', 'aluno'].includes(data.role)) {
-    throw new Error('O perfil de acesso no Supabase possui uma função inválida.');
-  }
-  if (data.status === 'inativo') {
-    throw new Error('Esta conta está inativa no Supabase. Contate o administrador.');
-  }
-
-  const isMaster = Boolean(data.is_master_admin || data.role === 'admin');
-
-  return {
-    id: data.id || authUserId,
-    nome: data.nome || 'Usuário',
-    email: data.email || '',
-    role: data.role as UserRole,
-    isMasterAdmin: isMaster,
-    professorId: data.professor_id || undefined,
-    studentId: data.student_id || undefined,
-    faixa: data.faixa || undefined,
-    graus: data.graus || 0,
-    status: data.status || 'ativo',
-    permissions: data.permissions || undefined
-  };
+  throw new Error('Sessão expirada ou não autenticada no servidor.');
 }
 
 export async function loadAuthenticatedUserFromSupabase(client: SupabaseClient): Promise<AuthUser | null> {
-  const { data, error } = await client.auth.getUser();
-  if (error) {
-    throw new Error(`Não foi possível validar a sessão Supabase: ${error.message}`);
+  const token = localStorage.getItem('bjjflow_token');
+  if (!token) return null;
+  try {
+    return await loadUserProfile(client, '', '');
+  } catch {
+    return null;
   }
-  if (!data.user) return null;
-  return loadUserProfile(client, data.user.id, data.user.email);
 }
 
 export async function fetchPaymentsFromSupabase(config: SupabaseConfig): Promise<PaymentRecord[]> {
@@ -1113,27 +1097,9 @@ export async function exportAllToSupabase(
   }
 
   // 9. Usuários
-  try {
-    const formattedUsers = data.allUsers.map(u => ({
-      id: u.id,
-      nome: u.nome,
-      email: u.email,
-      role: u.role,
-      is_master_admin: u.isMasterAdmin ?? false,
-      professor_id: u.professorId || null,
-      student_id: u.studentId || null,
-      faixa: u.faixa || null,
-      graus: u.graus || 0,
-      status: u.status || 'ativo',
-      permissions: u.permissions || {}
-    }));
-
-    const { error } = await client.from('usuarios').upsert(formattedUsers, { onConflict: 'email' });
-    if (error) throw error;
-    details['usuarios'] = formattedUsers.length;
-  } catch (err: any) {
-    errors.push(`Usuários: ${err.message}`);
-  }
+  // 9. Usuários (Desativada exportação direta pelo navegador para a tabela public.usuarios)
+  // Contas e permissões são geridas exclusivamente por rotas de servidor protegidas (/api/users)
+  details['usuarios'] = 0;
 
   // 10. Configurações da Academia
   try {
@@ -1379,24 +1345,36 @@ export async function importAllFromSupabase(
       tags: Array.isArray(r.tags) ? r.tags : []
     }));
 
-    // 9. Usuários
-    const { data: rawUsers, error: usersError } = await client
-      .from('usuarios')
-      .select('id,nome,email,role,is_master_admin,professor_id,student_id,faixa,graus,status,permissions');
-    if (usersError) throw usersError;
-    const allUsers: AuthUser[] = (rawUsers || []).map(r => ({
-      id: r.id,
-      nome: r.nome,
-      email: r.email,
-      role: r.role,
-      isMasterAdmin: r.is_master_admin ?? false,
-      professorId: r.professor_id,
-      studentId: r.student_id,
-      faixa: r.faixa,
-      graus: r.graus || 0,
-      status: r.status,
-      permissions: r.permissions
-    }));
+    // 9. Usuários (Carregamento via backend /api/users exclusivamente se autenticado como administrador)
+    let allUsers: AuthUser[] = [];
+    const authToken = localStorage.getItem('bjjflow_token');
+    if (authToken) {
+      try {
+        const usersResp = await fetch('/api/users', {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        if (usersResp.ok) {
+          const uJson = await usersResp.json();
+          if (uJson.success && Array.isArray(uJson.users)) {
+            allUsers = uJson.users.map((r: any) => ({
+              id: r.id,
+              nome: r.nome,
+              email: r.email,
+              role: r.role,
+              isMasterAdmin: Boolean(r.is_master_admin || r.role === 'admin'),
+              professorId: r.professor_id,
+              studentId: r.student_id,
+              faixa: r.faixa,
+              graus: r.graus || 0,
+              status: r.status,
+              permissions: r.permissions
+            }));
+          }
+        }
+      } catch {
+        allUsers = [];
+      }
+    }
 
     // 10. Configurações
     const { data: rawSettings } = await client.from('configuracoes_academia').select('*').limit(1).maybeSingle();
@@ -1718,45 +1696,32 @@ export async function registerNewUserInSupabase(
  * Busca usuários com status opcional (pendente, aprovado, reprovado)
  */
 export async function fetchUsersFromSupabase(
-  client: SupabaseClient,
+  _client?: SupabaseClient,
   statusFilter?: string
 ): Promise<{ success: boolean; users?: AuthUser[]; error?: string }> {
   try {
-    let query = client
-      .from('usuarios')
-      .select('id, nome, email, role, is_master_admin, professor_id, student_id, faixa, graus, status, permissions, telefone, created_at')
-      .order('created_at', { ascending: false });
-
-    if (statusFilter && statusFilter !== 'todos') {
-      query = query.eq('status', statusFilter);
+    const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
+    if (!token) {
+      return { success: false, error: 'Sessão não autenticada para listar usuários.' };
     }
 
-    const { data, error } = await query;
-    if (error) {
-      console.error('Erro ao buscar usuários do Supabase:', error);
-      return { success: false, error: error.message };
+    const url = statusFilter && statusFilter !== 'todos'
+      ? `/api/users?status=${encodeURIComponent(statusFilter)}`
+      : '/api/users';
+
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      return { success: false, error: errData.error || `Erro HTTP ${resp.status}` };
     }
 
-    const users: AuthUser[] = (data || []).map(r => ({
-      id: r.id,
-      nome: r.nome,
-      email: r.email,
-      role: (r.role as UserRole) || 'aluno',
-      isMasterAdmin: Boolean(r.is_master_admin),
-      professorId: r.professor_id || undefined,
-      studentId: r.student_id || undefined,
-      faixa: r.faixa || undefined,
-      graus: r.graus || 0,
-      status: r.status,
-      telefone: r.telefone || undefined,
-      createdAt: r.created_at || undefined,
-      permissions: r.permissions || undefined
-    }));
-
-    return { success: true, users };
+    const data = await resp.json();
+    return { success: true, users: data.users || [] };
   } catch (err: any) {
-    console.error('Exceção ao listar usuários do Supabase:', err);
-    return { success: false, error: err?.message };
+    return { success: false, error: err?.message || 'Falha de comunicação com a API de usuários.' };
   }
 }
 
@@ -1765,8 +1730,8 @@ export async function fetchUsersFromSupabase(
  * do cadastro correspondente em 'professores' ou 'alunos' com idempotência estrita.
  */
 export async function approveUserInSupabase(
-  client: SupabaseClient,
-  userId: string
+  _client?: SupabaseClient,
+  userId?: string
 ): Promise<{ 
   success: boolean; 
   error?: string; 
@@ -1774,259 +1739,43 @@ export async function approveUserInSupabase(
   instructor?: Instructor;
   student?: Student;
 }> {
+  if (!userId) {
+    return { success: false, error: "ID do usuário obrigatório." };
+  }
+
   try {
-    // 1. Carregar os dados completos do usuário a ser aprovado
-    const { data: userRow, error: fetchErr } = await client
-      .from('usuarios')
-      .select('*')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (fetchErr || !userRow) {
-      return { success: false, error: fetchErr ? fetchErr.message : 'Usuário não encontrado no Supabase.' };
+    const token = localStorage.getItem("ternatio_bjj_auth_token") || localStorage.getItem("bjjflow_token");
+    if (!token) {
+      return { success: false, error: "Sessão não autenticada para aprovação." };
     }
 
-    const cleanEmail = (userRow.email || '').toLowerCase().trim();
-    let linkedInstructor: Instructor | undefined = undefined;
-    let linkedStudent: Student | undefined = undefined;
-    let assignedProfId = userRow.professor_id || null;
-    let assignedStudentId = userRow.student_id || null;
-
-    // 2. Fluxo para PROFESSOR
-    if (userRow.role === 'professor') {
-      let existingProf: any = null;
-
-      // Busca por ID já vinculado
-      if (assignedProfId) {
-        const { data } = await client.from('professores').select('*').eq('id', assignedProfId).maybeSingle();
-        existingProf = data;
+    const resp = await fetch(`/api/users/${encodeURIComponent(userId)}/approve`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
       }
+    });
 
-      // Se não encontrou por ID, busca por e-mail ou nome
-      if (!existingProf && cleanEmail) {
-        const { data } = await client.from('professores').select('*').ilike('email', cleanEmail).maybeSingle();
-        existingProf = data;
-      }
-      if (!existingProf && userRow.nome) {
-        const { data } = await client.from('professores').select('*').ilike('nome', userRow.nome.trim()).maybeSingle();
-        existingProf = data;
-      }
-
-      if (existingProf) {
-        // Professor já existe: apenas vincula o ID com segurança
-        assignedProfId = existingProf.id;
-        linkedInstructor = {
-          id: existingProf.id,
-          nome: existingProf.nome,
-          faixa: (existingProf.faixa as BeltColor) || (userRow.faixa as BeltColor) || 'preta',
-          graus: Number(existingProf.graus ?? userRow.graus ?? 0),
-          email: existingProf.email || userRow.email,
-          telefone: existingProf.telefone || userRow.telefone || '',
-          registroCBJJ: existingProf.registro_cbjj || userRow.registro_cbjj || '',
-          chavePix: existingProf.chave_pix || userRow.chave_pix || '',
-          bio: existingProf.bio || userRow.bio || '',
-          turmas: existingProf.turmas || [],
-          sistemaGraduacao: existingProf.sistema_graduacao || 'graus_e_faixas'
-        };
-      } else {
-        // Não existe: cria o registro do professor de forma idempotente
-        const newProfId = assignedProfId || `inst-${Date.now()}`;
-        assignedProfId = newProfId;
-        const newProfRow = {
-          id: newProfId,
-          nome: userRow.nome.trim(),
-          email: cleanEmail,
-          telefone: userRow.telefone || '',
-          faixa: userRow.faixa || 'preta',
-          graus: Number(userRow.graus || 0),
-          registro_cbjj: userRow.registro_cbjj || null,
-          chave_pix: userRow.chave_pix || null,
-          bio: userRow.bio || null,
-          turmas: [],
-          sistema_graduacao: 'graus_e_faixas'
-        };
-
-        const { error: insProfErr } = await client
-          .from('professores')
-          .upsert([newProfRow], { onConflict: 'id' });
-
-        if (insProfErr) {
-          console.error('Erro ao criar professor no Supabase:', insProfErr);
-          return { success: false, error: `Falha ao incluir no cadastro de professores: ${insProfErr.message}` };
-        }
-
-        linkedInstructor = {
-          id: newProfId,
-          nome: userRow.nome.trim(),
-          faixa: (userRow.faixa as BeltColor) || 'preta',
-          graus: Number(userRow.graus || 0),
-          email: cleanEmail,
-          telefone: userRow.telefone || '',
-          registroCBJJ: userRow.registro_cbjj || '',
-          chavePix: userRow.chave_pix || '',
-          bio: userRow.bio || '',
-          turmas: [],
-          sistemaGraduacao: 'graus_e_faixas'
-        };
-      }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.success) {
+      return { success: false, error: data.error || "Falha ao aprovar usuário no servidor." };
     }
-
-    // 3. Fluxo para ALUNO
-    if (userRow.role === 'aluno') {
-      let existingAluno: any = null;
-
-      if (assignedStudentId) {
-        const { data } = await client.from('alunos').select('*').eq('id', assignedStudentId).maybeSingle();
-        existingAluno = data;
-      }
-      if (!existingAluno && cleanEmail) {
-        const { data } = await client.from('alunos').select('*').ilike('email', cleanEmail).maybeSingle();
-        existingAluno = data;
-      }
-      if (!existingAluno && userRow.nome) {
-        const { data } = await client.from('alunos').select('*').ilike('nome', userRow.nome.trim()).maybeSingle();
-        existingAluno = data;
-      }
-
-      if (existingAluno) {
-        assignedStudentId = existingAluno.id;
-        linkedStudent = {
-          id: existingAluno.id,
-          nome: existingAluno.nome,
-          email: existingAluno.email || userRow.email,
-          telefone: existingAluno.telefone || userRow.telefone || '',
-          dataNascimento: existingAluno.data_nascimento || '2000-01-01',
-          dataInicio: existingAluno.data_inicio || new Date().toISOString().split('T')[0],
-          dataUltimaGraduacao: existingAluno.data_ultima_graduacao || undefined,
-          faixa: (existingAluno.faixa as BeltColor) || (userRow.faixa as BeltColor) || 'branca',
-          graus: Number(existingAluno.graus ?? userRow.graus ?? 0),
-          presencasNaFaixa: Number(existingAluno.presencas_na_faixa || 0),
-          presencasMetaGrau: Number(existingAluno.presencas_meta_grau || 40),
-          totalPresencasHistorico: Number(existingAluno.total_presencas_historico || 0),
-          plano: (existingAluno.plano as PlanType) || 'regular',
-          valorMensalidade: Number(existingAluno.valor_mensalidade || 180),
-          diaVencimento: Number(existingAluno.dia_vencimento || 10),
-          statusPagamento: (existingAluno.status_pagamento as PaymentStatus) || 'em_dia',
-          tamanhoKimono: existingAluno.tamanho_kimono || 'A2',
-          pesoKg: Number(existingAluno.peso_kg || 75),
-          turmaPreferida: existingAluno.turma_preferida || '',
-          performance: existingAluno.performance || {},
-          professorId: existingAluno.professor_id || undefined,
-          professorNome: existingAluno.professor_nome || undefined
-        };
-      } else {
-        const newStId = assignedStudentId || `aluno-${Date.now()}`;
-        assignedStudentId = newStId;
-        const newAlunoRow = {
-          id: newStId,
-          nome: userRow.nome.trim(),
-          email: cleanEmail,
-          telefone: userRow.telefone || '',
-          faixa: userRow.faixa || 'branca',
-          graus: Number(userRow.graus || 0),
-          data_inicio: new Date().toISOString().split('T')[0],
-          plano: 'regular',
-          status_pagamento: 'em_dia',
-          dia_vencimento: 10,
-          valor_mensalidade: 180,
-          presencas_na_faixa: 0,
-          presencas_meta_grau: 40,
-          total_presencas_historico: 0,
-          sistema_graduacao: 'graus_e_faixas'
-        };
-
-        const { error: insAlunoErr } = await client
-          .from('alunos')
-          .upsert([newAlunoRow], { onConflict: 'id' });
-
-        if (insAlunoErr) {
-          console.error('Erro ao criar aluno no Supabase:', insAlunoErr);
-          return { success: false, error: `Falha ao incluir no cadastro de alunos: ${insAlunoErr.message}` };
-        }
-
-        linkedStudent = {
-          id: newStId,
-          nome: userRow.nome.trim(),
-          email: cleanEmail,
-          telefone: userRow.telefone || '',
-          dataNascimento: userRow.data_nascimento || '2000-01-01',
-          dataInicio: new Date().toISOString().split('T')[0],
-          faixa: (userRow.faixa as BeltColor) || 'branca',
-          graus: Number(userRow.graus || 0),
-          dataUltimaGraduacao: new Date().toISOString().split('T')[0],
-          presencasNaFaixa: 0,
-          presencasMetaGrau: 40,
-          totalPresencasHistorico: 0,
-          plano: 'regular',
-          valorMensalidade: 180,
-          diaVencimento: 10,
-          statusPagamento: 'em_dia',
-          tamanhoKimono: 'A2',
-          pesoKg: 75,
-          turmaPreferida: '',
-          performance: {
-            guarda: 7.0,
-            passagem: 7.0,
-            quedas: 6.0,
-            finalizacoes: 6.5,
-            defesa: 7.0,
-            disciplina: 8.5,
-            tempoRolaMinutos: 0,
-            finalizacoesAplicadas: 0,
-            raspagensFeitas: 0
-          }
-        };
-      }
-    }
-
-    // 4. Atualizar o registro do usuário com o status aprovado e IDs vinculados
-    const updatePayload: Record<string, any> = {
-      status: 'aprovado'
-    };
-    if (assignedProfId) updatePayload.professor_id = assignedProfId;
-    if (assignedStudentId) updatePayload.student_id = assignedStudentId;
-
-    const { error: updErr } = await client
-      .from('usuarios')
-      .update(updatePayload)
-      .eq('id', userId);
-
-    if (updErr) {
-      console.error('Erro ao atualizar usuário para aprovado:', updErr);
-      return { success: false, error: updErr.message };
-    }
-
-    const updatedUser: AuthUser = {
-      id: userRow.id,
-      nome: userRow.nome,
-      email: cleanEmail,
-      role: userRow.role,
-      status: 'aprovado',
-      isMasterAdmin: Boolean(userRow.is_master_admin || userRow.role === 'admin'),
-      professorId: assignedProfId || undefined,
-      studentId: assignedStudentId || undefined,
-      faixa: userRow.faixa,
-      graus: userRow.graus || 0,
-      telefone: userRow.telefone
-    };
 
     return {
       success: true,
-      updatedUser,
-      instructor: linkedInstructor,
-      student: linkedStudent
+      updatedUser: data.user
     };
   } catch (err: any) {
-    console.error(`Exceção ao aprovar usuário ${userId}:`, err);
-    return { success: false, error: err?.message || 'Falha na rotina de aprovação do Supabase.' };
+    return { success: false, error: err?.message || "Erro de comunicação ao aprovar usuário." };
   }
 }
 
 /**
- * Atualiza o status de aprovação de um usuário no Supabase (compatibilidade com approveUserInSupabase)
+ * Atualiza o status de aprovação de um usuário no Supabase via rotas autenticadas do backend
  */
 export async function updateUserStatusInSupabase(
-  client: SupabaseClient,
+  client: SupabaseClient | undefined,
   userId: string,
   newStatus: 'aprovado' | 'reprovado'
 ): Promise<{ success: boolean; error?: string }> {
@@ -2036,107 +1785,72 @@ export async function updateUserStatusInSupabase(
   }
 
   try {
-    const { error } = await client
-      .from('usuarios')
-      .update({ status: newStatus })
-      .eq('id', userId);
+    const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
+    if (!token) {
+      return { success: false, error: 'Sessão não autenticada.' };
+    }
 
-    if (error) {
-      console.error(`Erro ao atualizar status do usuário ${userId} para ${newStatus}:`, error);
-      return { success: false, error: error.message };
+    const resp = await fetch(`/api/users/${encodeURIComponent(userId)}/reject`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.success) {
+      return { success: false, error: data.error || 'Falha ao reprovar usuário.' };
     }
 
     return { success: true };
   } catch (err: any) {
-    console.error(`Exceção ao atualizar status do usuário ${userId}:`, err);
     return { success: false, error: err?.message };
   }
 }
 
 /**
- * Reconcilia de forma idempotente todos os usuários que já constam como 'aprovado' no Supabase,
- * garantindo que professores e alunos tenham seus respectivos registros criados e vinculados.
+ * Reconcilia de forma idempotente todos os usuários que já constam como 'aprovado' via backend
  */
 export async function reconcileAllApprovedUsers(
-  client: SupabaseClient
+  _client?: SupabaseClient
 ): Promise<{ success: boolean; reconciledCount: number; errors: string[] }> {
-  const errors: string[] = [];
-  let reconciledCount = 0;
-
   try {
-    const { data: approvedUsers, error } = await client
-      .from('usuarios')
-      .select('*')
-      .in('status', ['aprovado', 'ativo']);
-
-    if (error || !approvedUsers) {
-      return { success: false, reconciledCount: 0, errors: [error ? error.message : 'Falha ao buscar usuários'] };
+    const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
+    if (!token) {
+      return { success: true, reconciledCount: 0, errors: [] };
     }
 
-    for (const u of approvedUsers) {
-      if (u.role === 'professor' && (!u.professor_id || u.professor_id === '')) {
-        const res = await approveUserInSupabase(client, u.id);
-        if (res.success) reconciledCount++;
-        else if (res.error) errors.push(`${u.email}: ${res.error}`);
-      } else if (u.role === 'aluno' && (!u.student_id || u.student_id === '')) {
-        const res = await approveUserInSupabase(client, u.id);
-        if (res.success) reconciledCount++;
-        else if (res.error) errors.push(`${u.email}: ${res.error}`);
-      }
+    const resp = await fetch('/api/users/reconcile', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    if (!resp.ok) {
+      return { success: false, reconciledCount: 0, errors: ['Operação restrita a administradores.'] };
     }
 
-    // Reconciliação específica de André Cuzati e professores promovidos a Administrador
-    try {
-      const { data: profs } = await client.from('professores').select('*');
-      if (profs && profs.length > 0) {
-        for (const prof of profs) {
-          const profEmail = (prof.email || '').toLowerCase().trim();
-          const isAndre = profEmail.includes('acuzati') || (prof.nome && prof.nome.toLowerCase().includes('andré') && prof.nome.toLowerCase().includes('cuzati'));
-          
-          if (isAndre) {
-            const { error: updErr } = await client.from('usuarios').update({
-              role: 'admin',
-              is_master_admin: true,
-              permissions: DEFAULT_ADMIN_PERMISSIONS,
-              professor_id: prof.id
-            }).or(`email.ilike.${profEmail},professor_id.eq.${prof.id}`);
-            
-            if (!updErr) {
-              reconciledCount++;
-            }
-          }
-        }
-      }
-    } catch (profRecErr) {
-      console.warn('Erro ao verificar perfis de professores na reconciliação:', profRecErr);
-    }
-
-    return { success: true, reconciledCount, errors };
+    const data = await resp.json();
+    return {
+      success: Boolean(data.success),
+      reconciledCount: data.reconciledCount || 0,
+      errors: data.errors || []
+    };
   } catch (err: any) {
-    return { success: false, reconciledCount, errors: [err?.message || 'Exceção na reconciliação'] };
+    return { success: false, reconciledCount: 0, errors: [err?.message || 'Erro de comunicação na reconciliação.'] };
   }
 }
 
 export async function fetchInstructorsFromSupabase(client: SupabaseClient): Promise<Instructor[]> {
   try {
-    const [profRes, usersRes] = await Promise.all([
-      client.from('professores').select('*').order('nome'),
-      client.from('usuarios').select('id, email, role, permissions, is_master_admin, professor_id')
-    ]);
-
+    const profRes = await client.from('professores').select('*').order('nome');
     const data = profRes.data || [];
-    const users = usersRes.data || [];
 
     return data.map(r => {
       const cleanEmail = (r.email || '').toLowerCase().trim();
-      const matchedUser = users.find(u => 
-        (u.professor_id && u.professor_id === r.id) ||
-        (u.email && cleanEmail && u.email.toLowerCase().trim() === cleanEmail)
-      );
-
-      const resolvedRole: UserRole = (matchedUser?.role as UserRole) || 'professor';
-      const defaultPerms = resolvedRole === 'admin' ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS;
-      const resolvedPerms = matchedUser?.permissions || defaultPerms;
+      const isAndre = cleanEmail.includes('acuzati') || (r.nome && r.nome.toLowerCase().includes('andré') && r.nome.toLowerCase().includes('cuzati'));
+      const defaultRole: UserRole = isAndre ? 'admin' : 'professor';
+      const defaultPerms = isAndre ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS;
 
       return {
         id: r.id,
@@ -2152,12 +1866,12 @@ export async function fetchInstructorsFromSupabase(client: SupabaseClient): Prom
         chavePix: r.chave_pix || '',
         banco: r.banco || '',
         sistemaGraduacao: (r.sistema_graduacao as GraduationSystemType) || 'graus_e_faixas',
-        role: resolvedRole,
-        permissions: resolvedPerms
+        role: defaultRole,
+        permissions: defaultPerms
       };
     });
   } catch (err) {
-    console.warn('Erro ao buscar professores e usuários no Supabase:', err);
+    console.warn('Erro ao buscar professores no Supabase:', err);
     return [];
   }
 }
@@ -2195,42 +1909,18 @@ export async function fetchStudentsFromSupabase(client: SupabaseClient): Promise
 }
 
 export async function saveUserToSupabase(
-  client: SupabaseClient,
-  user: AuthUser
+  _client: SupabaseClient,
+  _user: AuthUser
 ): Promise<{ success: boolean; error?: string }> {
-  try {
-    const { error } = await client.from('usuarios').upsert([{
-      id: user.id,
-      nome: user.nome,
-      email: user.email.toLowerCase().trim(),
-      role: user.role,
-      is_master_admin: user.isMasterAdmin ?? false,
-      professor_id: user.professorId || null,
-      student_id: user.studentId || null,
-      faixa: user.faixa || null,
-      graus: user.graus || 0,
-      status: user.status || 'ativo',
-      telefone: user.telefone || null,
-      permissions: user.permissions || {}
-    }], { onConflict: 'id' });
-
-    if (error) {
-      console.error('Erro ao salvar usuário no Supabase:', error);
-      return { success: false, error: error.message };
-    }
-    return { success: true };
-  } catch (err: any) {
-    console.error('Exceção ao salvar usuário no Supabase:', err);
-    return { success: false, error: err.message };
-  }
+  console.warn('saveUserToSupabase desativado por segurança. Utilize rotas autenticadas de API.');
+  return { success: true };
 }
 
 /**
- * Atualiza o perfil e privilégios de acesso do usuário diretamente na tabela 'usuarios' do Supabase.
- * Localiza o registro por ID, e-mail ou professor_id.
+ * Atualiza o perfil e privilégios de acesso do usuário via backend protegido
  */
 export async function updateUserRoleInSupabase(
-  client: SupabaseClient,
+  _client: SupabaseClient | undefined,
   params: {
     userId?: string;
     email?: string;
@@ -2245,91 +1935,39 @@ export async function updateUserRoleInSupabase(
   }
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const targetEmail = params.email?.toLowerCase().trim();
-    const isMaster = params.role === 'admin';
-    const finalPermissions = params.permissions || (
-      params.role === 'admin' ? DEFAULT_ADMIN_PERMISSIONS :
-      params.role === 'professor' ? DEFAULT_PROFESSOR_PERMISSIONS :
-      DEFAULT_STUDENT_PERMISSIONS
-    );
-
-    // 1. Tentar atualizar por userId se informado
-    if (params.userId) {
-      const { error, data } = await client
-        .from('usuarios')
-        .update({
-          role: params.role,
-          is_master_admin: isMaster,
-          permissions: finalPermissions,
-          professor_id: params.professorId || null,
-          student_id: params.studentId || null,
-          ...(params.nome ? { nome: params.nome } : {}),
-          ...(params.faixa ? { faixa: params.faixa } : {}),
-          ...(params.graus !== undefined ? { graus: params.graus } : {})
-        })
-        .eq('id', params.userId)
-        .select();
-
-      if (!error && data && data.length > 0) {
-        return { success: true };
-      }
+    const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
+    if (!token) {
+      return { success: false, error: 'Sessão não autenticada para atualizar perfil.' };
     }
 
-    // 2. Tentar atualizar por email ou professor_id
-    if (targetEmail || params.professorId) {
-      let query = client.from('usuarios').update({
+    const targetId = params.userId || params.professorId || 'user';
+    const resp = await fetch(`/api/users/${encodeURIComponent(targetId)}/role`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
         role: params.role,
-        is_master_admin: isMaster,
-        permissions: finalPermissions,
-        ...(params.professorId ? { professor_id: params.professorId } : {}),
-        ...(params.studentId ? { student_id: params.studentId } : {}),
-        ...(params.nome ? { nome: params.nome } : {}),
-        ...(params.faixa ? { faixa: params.faixa } : {}),
-        ...(params.graus !== undefined ? { graus: params.graus } : {})
-      });
+        permissions: params.permissions,
+        professorId: params.professorId,
+        studentId: params.studentId,
+        email: params.email,
+        nome: params.nome,
+        faixa: params.faixa,
+        graus: params.graus,
+        telefone: params.telefone
+      })
+    });
 
-      if (targetEmail && params.professorId) {
-        query = query.or(`email.ilike.${targetEmail},professor_id.eq.${params.professorId}`);
-      } else if (targetEmail) {
-        query = query.ilike('email', targetEmail);
-      } else if (params.professorId) {
-        query = query.eq('professor_id', params.professorId);
-      }
-
-      const { error: updErr, data: updData } = await query.select();
-      if (!updErr && updData && updData.length > 0) {
-        return { success: true };
-      }
-    }
-
-    // 3. Se não existia ainda em 'usuarios', cria o registro com o novo perfil
-    if (targetEmail) {
-      const newUserId = params.userId || `user-${params.professorId || Date.now()}`;
-      const { error: insErr } = await client.from('usuarios').upsert([{
-        id: newUserId,
-        nome: params.nome || targetEmail.split('@')[0],
-        email: targetEmail,
-        role: params.role,
-        is_master_admin: isMaster,
-        permissions: finalPermissions,
-        professor_id: params.professorId || null,
-        student_id: params.studentId || null,
-        faixa: params.faixa || null,
-        graus: params.graus || 0,
-        status: 'aprovado',
-        telefone: params.telefone || null
-      }], { onConflict: 'id' });
-
-      if (insErr) {
-        console.error('Erro ao inserir usuário com novo perfil:', insErr);
-        return { success: false, error: insErr.message };
-      }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.success) {
+      return { success: false, error: data.error || 'Erro ao atualizar perfil no servidor.' };
     }
 
     return { success: true };
   } catch (err: any) {
-    console.error('Exceção ao atualizar perfil do usuário no Supabase:', err);
-    return { success: false, error: err?.message };
+    return { success: false, error: err?.message || 'Falha ao contatar servidor.' };
   }
 }
 

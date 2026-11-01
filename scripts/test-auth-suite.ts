@@ -199,7 +199,7 @@ async function runTestSuite() {
     const targetUserIdToUpdate = sessionUserId; // Req.user.id prevalece estritamente
 
     assert(targetUserIdToUpdate === 'usr-vitima', 'Usuário A NÃO consegue alterar a senha de Usuário B (IDOR prevenido)');
-    assert(targetUserIdToUpdate !== bodyUserId, 'ID enviado no corpo da requisição é completamente ignorado');
+    assert(targetUserIdToUpdate !== (bodyUserId as string), 'ID enviado no corpo da requisição é completamente ignorado');
   }
 
   // -------------------------------------------------------------------------
