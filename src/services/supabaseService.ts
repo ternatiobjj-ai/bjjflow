@@ -1869,7 +1869,7 @@ export async function fetchInstructorsFromSupabase(client: SupabaseClient): Prom
 
     return data.map(r => {
       const cleanEmail = (r.email || '').toLowerCase().trim();
-      const isAndre = cleanEmail.includes('acuzati') || (r.nome && r.nome.toLowerCase().includes('andré') && r.nome.toLowerCase().includes('cuzati'));
+      const isAndre = cleanEmail === 'acuzati@gmail.com';
       const defaultRole: UserRole = isAndre ? 'admin' : 'professor';
       const defaultPerms = isAndre ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS;
 

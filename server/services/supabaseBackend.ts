@@ -3,12 +3,26 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 // URL e chave do projeto Ternatio BJJ para o backend Express
 export const BACKEND_SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://rbvyyekrsjfweewgnyuh.supabase.co';
+
+/**
+ * A chave de serviço administrativa (SUPABASE_SERVICE_ROLE_KEY) é exclusiva do servidor backend.
+ * NUNCA deve possuir o prefixo VITE_, impedindo estritamente que seja empacotada no bundle do cliente.
+ */
+export function getServiceRoleKey(): string | undefined {
+  return (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SERVICE_ROLE_KEY
+  );
+}
+
+export function isServiceRoleConfigured(): boolean {
+  return Boolean(getServiceRoleKey());
+}
+
 export const BACKEND_SUPABASE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SERVICE_KEY ||
-  process.env.SUPABASE_SECRET_KEY ||
-  process.env.SERVICE_ROLE_KEY ||
-  process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
+  getServiceRoleKey() ||
   process.env.SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
   'sb_publishable_BHPL4Bd5KL9qiURdLevMBQ_C0Ld7-D9';
@@ -18,23 +32,14 @@ let lastUsedKey: string | null = null;
 
 export function getBackendSupabaseClient(): SupabaseClient {
   const currentUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://rbvyyekrsjfweewgnyuh.supabase.co';
+  const serviceKey = getServiceRoleKey();
   const currentKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_SECRET_KEY ||
-    process.env.SERVICE_ROLE_KEY ||
-    process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
+    serviceKey ||
     process.env.SUPABASE_ANON_KEY ||
     process.env.VITE_SUPABASE_ANON_KEY ||
     'sb_publishable_BHPL4Bd5KL9qiURdLevMBQ_C0Ld7-D9';
 
-  const isServiceRole = Boolean(
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_SECRET_KEY ||
-    process.env.SERVICE_ROLE_KEY ||
-    process.env.VITE_SUPABASE_SERVICE_ROLE_KEY
-  );
+  const isServiceRole = Boolean(serviceKey);
 
   if (!backendClient || lastUsedKey !== currentKey) {
     if (!isServiceRole) {

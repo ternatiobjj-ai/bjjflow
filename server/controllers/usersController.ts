@@ -57,59 +57,6 @@ export class UsersController {
 
       const { data, error } = await query;
       if (error) {
-        if (error.code === '42501' || error.message?.includes('permission denied')) {
-          // Fallback resiliente: sintetiza lista a partir das tabelas públicas de professores e alunos
-          const { data: profs } = await client.from('professores').select('*');
-          const { data: students } = await client.from('alunos').select('*');
-          const synthesized: any[] = [];
-
-          if (profs) {
-            for (const p of profs) {
-              const cleanProfEmail = (p.email || '').toLowerCase().trim();
-              const isMaster = cleanProfEmail === 'ternatiobjj@gmail.com' || cleanProfEmail.includes('acuzati');
-              synthesized.push({
-                id: p.id,
-                nome: p.nome,
-                email: p.email,
-                role: isMaster ? 'admin' : 'professor',
-                is_master_admin: isMaster,
-                status: 'aprovado',
-                professor_id: p.id,
-                student_id: null,
-                faixa: p.faixa || 'preta',
-                graus: p.graus || 0,
-                permissions: isMaster ? DEFAULT_ADMIN_PERMISSIONS : DEFAULT_PROFESSOR_PERMISSIONS,
-                telefone: p.telefone || '',
-                created_at: p.created_at || new Date().toISOString()
-              });
-            }
-          }
-
-          if (students) {
-            for (const s of students) {
-              synthesized.push({
-                id: s.id,
-                nome: s.nome,
-                email: s.email,
-                role: 'aluno',
-                is_master_admin: false,
-                status: 'aprovado',
-                professor_id: s.professor_id || null,
-                student_id: s.id,
-                faixa: s.faixa || 'branca',
-                graus: s.graus || 0,
-                permissions: DEFAULT_STUDENT_PERMISSIONS,
-                telefone: s.telefone || '',
-                created_at: s.created_at || new Date().toISOString()
-              });
-            }
-          }
-
-          const filtered = status && status !== 'todos' ? synthesized.filter(u => u.status === status) : synthesized;
-          res.json({ success: true, users: filtered });
-          return;
-        }
-
         res.status(500).json({ success: false, error: error.message });
         return;
       }
@@ -434,7 +381,7 @@ export class UsersController {
         if (profs && profs.length > 0) {
           for (const prof of profs) {
             const profEmail = (prof.email || '').toLowerCase().trim();
-            const isAndre = profEmail.includes('acuzati') || (prof.nome && prof.nome.toLowerCase().includes('andré') && prof.nome.toLowerCase().includes('cuzati'));
+            const isAndre = profEmail === 'acuzati@gmail.com';
 
             if (isAndre) {
               const { error: updErr } = await client.from('usuarios').update({

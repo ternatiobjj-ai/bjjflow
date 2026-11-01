@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { checkDatabaseHealth, BACKEND_SUPABASE_URL } from '../services/supabaseBackend';
+import { checkDatabaseHealth, BACKEND_SUPABASE_URL, isServiceRoleConfigured } from '../services/supabaseBackend';
 
 const router = Router();
 
@@ -15,11 +15,12 @@ router.get('/health', async (_req: Request, res: Response) => {
   });
 });
 
-// Endpoint de status das configurações
+// Endpoint de status das configurações (nunca expõe segredos ou chaves)
 router.get('/config', (_req: Request, res: Response) => {
   res.json({
     supabaseConfigured: Boolean(BACKEND_SUPABASE_URL),
     supabaseUrl: BACKEND_SUPABASE_URL,
+    serviceRoleConfigured: isServiceRoleConfigured(),
     apiVersion: '1.0.0',
     environment: process.env.NODE_ENV || 'development'
   });
