@@ -58,6 +58,7 @@ import {
   registerNewUserInSupabase,
   fetchUsersFromSupabase,
   updateUserStatusInSupabase,
+  safeParseJsonResponse,
   approveUserInSupabase,
   reconcileAllApprovedUsers,
   fetchInstructorsFromSupabase,
@@ -344,7 +345,7 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setAuthError(null);
 
-    const token = localStorage.getItem('ternatio_bjj_auth_token');
+    const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
     if (!token) {
       setCurrentUser(EMPTY_AUTH_USER);
       setIsAuthenticated(false);
@@ -368,12 +369,13 @@ export const BjjProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           try {
             localStorage.removeItem(STORAGE_PREFIX + 'auth_user');
             localStorage.removeItem('ternatio_bjj_auth_token');
+            localStorage.removeItem('bjjflow_token');
           } catch {}
           return;
         }
 
-        const data = await resp.json();
-        if (data.success && data.user) {
+        const data = await safeParseJsonResponse(resp);
+        if (data && data.success && data.user) {
           const verifiedUser: AuthUser = {
             id: data.user.id,
             nome: data.user.nome,

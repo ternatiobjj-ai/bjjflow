@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,11 +7,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const compiledServer = path.resolve(__dirname, 'dist', 'server.js');
 
-// Em produção (após npm run build), executa o bundle JavaScript nativo de alta performance
-if (fs.existsSync(compiledServer)) {
+// Em produção (após build com NODE_ENV=production), executa o bundle JavaScript de alta performance
+if (process.env.NODE_ENV === 'production' && fs.existsSync(compiledServer)) {
   await import('./dist/server.js');
 } else {
-  // Em desenvolvimento (tsx server.ts)
+  // Em desenvolvimento (tsx server.ts) ou fallback
   await import('./server/app.ts');
 }
 

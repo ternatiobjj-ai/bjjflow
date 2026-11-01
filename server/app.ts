@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -8,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 export async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.DEFAULT_APP_PORT ? parseInt(process.env.DEFAULT_APP_PORT, 10) : 3000);
 
   // Middlewares básicos para requisições JSON e URL encoded
   app.use(express.json());
@@ -16,6 +17,21 @@ export async function startServer() {
 
   // Montagem das rotas de API do Backend em /api
   app.use('/api', serverRouter);
+
+  // Tratamento 404 estrito para rotas /api e /api/* não mapeadas (garante JSON, nunca HTML)
+  app.all(['/api', '/api/*'], (_req, res) => {
+    res.status(404).json({ success: false, error: 'Endpoint da API não encontrado' });
+  });
+
+  // Middleware de tratamento de erro para rotas /api (garante resposta JSON, nunca HTML)
+  app.use('/api', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[API SERVER ERROR]', err);
+    res.status(err.status || 500).json({
+      success: false,
+      message: err.message || 'Erro interno no servidor.',
+      error_code: err.code || 'INTERNAL_SERVER_ERROR'
+    });
+  });
 
   // Integração com Frontend
   if (process.env.NODE_ENV === 'production') {

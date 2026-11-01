@@ -591,16 +591,26 @@ export function getSupabaseClient(config?: Partial<SupabaseConfig>): SupabaseCli
   }
 }
 
+export async function safeParseJsonResponse(response: Response): Promise<any> {
+  try {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return await response.json();
+    }
+  } catch {}
+  return null;
+}
+
 async function loadUserProfile(_client: SupabaseClient, authUserId: string, authEmail?: string): Promise<AuthUser> {
-  const token = localStorage.getItem('bjjflow_token');
+  const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
   if (token) {
     try {
       const resp = await fetch('/api/auth/me', {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (resp.ok) {
-        const data = await resp.json();
-        if (data.success && data.user) {
+        const data = await safeParseJsonResponse(resp);
+        if (data && data.success && data.user) {
           const isMaster = Boolean(data.user.is_master_admin || data.user.role === 'admin');
           return {
             id: data.user.id || authUserId,
@@ -1347,15 +1357,15 @@ export async function importAllFromSupabase(
 
     // 9. Usuários (Carregamento via backend /api/users exclusivamente se autenticado como administrador)
     let allUsers: AuthUser[] = [];
-    const authToken = localStorage.getItem('bjjflow_token');
+    const authToken = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
     if (authToken) {
       try {
         const usersResp = await fetch('/api/users', {
           headers: { Authorization: `Bearer ${authToken}` }
         });
         if (usersResp.ok) {
-          const uJson = await usersResp.json();
-          if (uJson.success && Array.isArray(uJson.users)) {
+          const uJson = await safeParseJsonResponse(usersResp);
+          if (uJson && uJson.success && Array.isArray(uJson.users)) {
             allUsers = uJson.users.map((r: any) => ({
               id: r.id,
               nome: r.nome,
@@ -1614,12 +1624,13 @@ export async function authenticateUserWithSupabase(
       body: JSON.stringify({ email: cleanEmail, password })
     });
 
-    const resJson = await response.json();
+    const resJson = await safeParseJsonResponse(response);
 
-    if (response.ok && resJson.success && resJson.user) {
+    if (resJson && response.ok && resJson.success && resJson.user) {
       if (resJson.token) {
         try {
           localStorage.setItem('ternatio_bjj_auth_token', resJson.token);
+          localStorage.setItem('bjjflow_token', resJson.token);
         } catch {}
       }
       return {
@@ -1630,12 +1641,22 @@ export async function authenticateUserWithSupabase(
       };
     }
 
+    if (resJson) {
+      return {
+        success: false,
+        message: resJson.message || 'E-mail ou senha inválidos.'
+      };
+    }
+
+    // Se o backend retornou conteúdo não-JSON (ex: página HTML de erro ou proxy)
     return {
       success: false,
-      message: resJson.message || 'E-mail ou senha inválidos.'
+      message: response.status === 503
+        ? 'Serviço de autenticação temporariamente indisponível. Aguarde alguns instantes e tente novamente.'
+        : `Erro de comunicação com o servidor de autenticação (HTTP ${response.status}). Verifique sua conexão.`
     };
-  } catch (backendFetchErr) {
-    console.error('[AUTH ERROR] Falha de comunicação com /api/auth/login:', backendFetchErr);
+  } catch (backendFetchErr: any) {
+    console.warn('[AUTH WARNING] Falha de comunicação de rede com /api/auth/login:', backendFetchErr?.message);
     return {
       success: false,
       message: 'Não foi possível conectar ao servidor de autenticação. Verifique sua conexão e tente novamente.'
@@ -1674,14 +1695,14 @@ export async function registerNewUserInSupabase(
       })
     });
 
-    const resJson = await resp.json();
-    if (resp.ok && resJson.success) {
+    const resJson = await safeParseJsonResponse(resp);
+    if (resJson && resp.ok && resJson.success) {
       return { success: true, message: resJson.message };
     }
 
     return {
       success: false,
-      message: resJson.message || 'Erro ao realizar cadastro.'
+      message: resJson?.message || 'Erro ao realizar cadastro.'
     };
   } catch (err: any) {
     console.error('Falha de conexão com /api/auth/register:', err?.message);
@@ -1830,11 +1851,11 @@ export async function reconcileAllApprovedUsers(
       return { success: false, reconciledCount: 0, errors: ['Operação restrita a administradores.'] };
     }
 
-    const data = await resp.json();
+    const data = await safeParseJsonResponse(resp);
     return {
-      success: Boolean(data.success),
-      reconciledCount: data.reconciledCount || 0,
-      errors: data.errors || []
+      success: Boolean(data?.success),
+      reconciledCount: data?.reconciledCount || 0,
+      errors: data?.errors || []
     };
   } catch (err: any) {
     return { success: false, reconciledCount: 0, errors: [err?.message || 'Erro de comunicação na reconciliação.'] };
@@ -1989,7 +2010,7 @@ export async function changeUserPasswordInSupabase(
       return { success: false, message: 'A senha atual é obrigatória.' };
     }
 
-    const token = localStorage.getItem('ternatio_bjj_auth_token');
+    const token = localStorage.getItem('ternatio_bjj_auth_token') || localStorage.getItem('bjjflow_token');
     if (!token) {
       return { success: false, message: 'Sessão expirada. Faça login novamente antes de alterar a senha.' };
     }
@@ -2005,17 +2026,17 @@ export async function changeUserPasswordInSupabase(
       body: JSON.stringify({ currentPassword, newPassword })
     });
 
-    const data = await resp.json();
-    if (resp.ok && data.success) {
+    const data = await safeParseJsonResponse(resp);
+    if (resp.ok && data?.success) {
       return { success: true, message: data.message || 'Senha alterada com sucesso!' };
     }
 
     return {
       success: false,
-      message: data.message || 'Erro ao alterar senha no servidor.'
+      message: data?.message || 'Erro ao alterar senha no servidor.'
     };
   } catch (backendErr: any) {
-    console.error('[AUTH ERROR] Falha ao comunicar com /api/auth/change-password:', backendErr);
+    console.warn('[AUTH WARNING] Falha ao comunicar com /api/auth/change-password:', backendErr?.message);
     return {
       success: false,
       message: 'Não foi possível conectar ao servidor para alterar a senha. Tente novamente em instantes.'
@@ -2046,8 +2067,8 @@ export async function requestPasswordResetInSupabase(
       body: JSON.stringify({ email: cleanEmail })
     });
 
-    const data = await resp.json();
-    if (resp.ok && data.success) {
+    const data = await safeParseJsonResponse(resp);
+    if (resp.ok && data?.success) {
       return {
         success: true,
         userFound: true,

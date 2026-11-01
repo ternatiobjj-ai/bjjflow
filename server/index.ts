@@ -6,6 +6,9 @@ import systemRoutes from './routes/system.routes';
 const serverRouter = Router();
 
 // Subrotas da API do Backend
+serverRouter.get('/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'Ternatio BJJ API' });
+});
 serverRouter.use('/auth', authRoutes);
 serverRouter.use('/users', usersRoutes);
 serverRouter.use('/system', systemRoutes);
